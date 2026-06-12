@@ -1,0 +1,12 @@
+{
+  "name": "compliance-report",
+  "description": "준법감시보고서 작성 — 케이런7호(2024 IBK혁신 케이런 모빌리티 7호) 펀드 투자건의 투자계약서·투자심사보고서로부터 준법사항체크리스트(HWPX) 와 투자계약서 체크리스트(DOCX) 를 자동 생성하는 준법감시 산출물 도구",
+  "version": "1.0.0",
+  "author": {
+    "name": "K-Run Ventures",
+    "email": "antonio103@gmail.com"
+  },
+  "homepage": "https://github.com/antonio103first/compliance-report",
+  "repository": "https://github.com/antonio103first/compliance-report",
+  "license": "MIT"
+}

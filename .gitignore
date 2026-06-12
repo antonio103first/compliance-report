@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 실데이터 — 절대 커밋 금지 (양식 placeholder 파일은 제외)
+output/
+/samples/
+company_data*.json
+confirmed*.json
+*_data.json
+
+# 임시/작업 파일
+_*.txt
+_*.hwpx
+*.tmp
+.DS_Store
+
+# 주의: 아래 양식 파일은 커밋 대상 (placeholder 익명화본)
+#   plugins/compliance-report/skills/compliance-report/(양식) *.hwpx
+#   plugins/compliance-report/skills/compliance-report/(양식) *.docx
