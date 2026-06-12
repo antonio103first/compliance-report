@@ -1,14 +1,13 @@
 # 준법감시보고서 작성 (Claude Code 스킬)
 
 K-Run Ventures **케이런7호 펀드** 투자건의 **투자계약서·투자심사보고서**로부터
-**준법사항체크리스트(준법감시보고서) 한글(.hwpx)** 과 **투자계약서 체크리스트(.docx)** 를
-**자동 작성**하는 Claude Code 스킬입니다.
+**준법사항체크리스트(준법감시보고서) 한글(.hwpx)** 을 **자동 작성**하는 Claude Code 스킬입니다.
 
 > ⚠️ 이 저장소에는 **실제 투자정보·개인정보가 전혀 없습니다.** 양식의 예시는 모두 `㈜AAA` · `[대표이사]` 등 placeholder 입니다.
 > 실제 데이터는 각자 본인 PC 에서만 처리됩니다(외부 전송 없음).
 
-> 🔗 **관련 스킬:** 본 스킬은 **준법사항체크리스트(.hwpx) + 투자계약서 체크리스트(.docx)** 2종을 함께 생성합니다.
-> **투자계약서 체크리스트(.docx)만** 단독으로 필요하면 👉 [investment-contract-checklist](https://github.com/antonio103first/investment-contract-checklist) 를 사용하세요.
+> 🔗 **관련 스킬:** 본 스킬은 **준법사항체크리스트(.hwpx)** 만 생성합니다.
+> **투자계약서 체크리스트(.docx)** 가 필요하면 👉 [investment-contract-checklist](https://github.com/antonio103first/investment-contract-checklist) 를 사용하세요.
 
 ---
 
@@ -54,10 +53,8 @@ Claude Code를 **완전히 종료했다가 다시 실행**합니다.
 
 Claude가 자동으로:
 1. 두 문서에서 핵심 항목(회사명·투자금액·단가·주식수·위약벌·담당자 등)을 추출
-2. **일치 여부를 교차검증**(불일치 발견 시 보고서에 주석)
-3. 다음 2종을 생성합니다.
-   - `output/준법사항체크리스트_{펀드}_{회사}.hwpx` ← **준법감시보고서 정본**
-   - `output/투자계약서 체크리스트 및 의무기재사항확인서_{회사}.docx`
+2. **일치 여부를 교차검증**(불일치 발견 시 콘솔에 경고)
+3. `output/준법사항체크리스트_{펀드}_{회사}.hwpx` (**준법감시보고서 정본**)를 생성합니다.
 4. 미상 항목·발견사항을 요약 보고합니다.
 
 > 📄 원본이 `.hwp/.hwpx` 라면, 한글에서 **다른 이름으로 저장 → `.docx`** 로 변환 후 사용하면 가장 정확합니다.
@@ -147,9 +144,8 @@ compliance-report/
         ├── SKILL.md
         ├── generate_checklists.py             # 메인 CLI
         ├── extractors/                        # 계약서·투심보고서·PDF·bizno 파서
-        ├── generators/                        # docx·hwpx 생성기
-        ├── (양식) 준법사항체크리스트.hwpx          # 익명화 양식 (placeholder)
-        └── (양식) 투자계약서 체크리스트 ….docx
+        ├── generators/                        # hwpx 생성기
+        └── (양식) 준법사항체크리스트.hwpx          # 익명화 양식 (placeholder)
 ```
 
 ---

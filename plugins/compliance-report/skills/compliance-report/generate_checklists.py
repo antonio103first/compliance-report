@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-투자 체크리스트 자동 생성 시스템
+준법사항체크리스트(준법감시보고서) 자동 생성 시스템
 
-투자계약서와 투자심사보고서를 입력받아 다음 2종의 체크리스트를 자동 생성합니다:
-1. 투자계약서 체크리스트 및 의무기재사항확인서 (.docx)
-2. 준법사항체크리스트 (.hwpx)
+투자계약서와 투자심사보고서를 입력받아 다음 문서를 자동 생성합니다:
+- 준법사항체크리스트 (.hwpx) — 준법감시보고서 정본
 
 사용법:
   python generate_checklists.py \\
     --contract "투자계약서.docx" \\
     --report "투심보고서.docx" \\
     --output-dir ./output
+
+※ 투자계약서 체크리스트(.docx) 만 단독으로 필요하면 별도 스킬을 사용하세요:
+  https://github.com/antonio103first/investment-contract-checklist
 """
 import argparse
 import json
@@ -19,17 +21,7 @@ import sys
 
 from extractors.contract_extractor import extract_contract_data
 from extractors.report_extractor import extract_report_data
-from generators.docx_generator import generate_docx_checklist
 from generators.hwpx_generator import generate_hwpx_checklist
-from generators.hwpx_to_docx import convert_hwpx_to_docx, hancom_clean_hwpx
-
-
-# 기본 템플릿 경로
-DEFAULT_TEMPLATE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DOCX_TEMPLATE = os.path.join(
-    DEFAULT_TEMPLATE_DIR,
-    "(양식) 투자계약서 체크리스트 및 의무기재사항확인서_2024 IBK 혁신펀드.docx"
-)
 
 
 # 수동 확정 주입 가능한 회사정보 필드 (report_data 속성명)
@@ -89,7 +81,7 @@ def _apply_overrides(args, contract_data, report_data):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="투자 체크리스트 자동 생성 시스템"
+        description="준법사항체크리스트(준법감시보고서) 자동 생성 시스템"
     )
     parser.add_argument(
         "--contract", required=True,
@@ -102,14 +94,6 @@ def main():
     parser.add_argument(
         "--output-dir", default="./output",
         help="출력 디렉토리 (기본: ./output)"
-    )
-    parser.add_argument(
-        "--docx-template", default=DEFAULT_DOCX_TEMPLATE,
-        help="투자계약서 체크리스트 DOCX 양식 파일 경로"
-    )
-    parser.add_argument(
-        "--compliance-format", choices=["docx", "hwpx", "both"], default="hwpx",
-        help="준법감시보고서 출력 형식 (기본: hwpx 양식 그대로). docx 는 한컴 COM 변환본"
     )
     parser.add_argument(
         "--company-name", default=None,
@@ -133,15 +117,11 @@ def main():
             print(f"[ERROR] {name} 파일을 찾을 수 없습니다: {path}")
             sys.exit(1)
 
-    if not os.path.exists(args.docx_template):
-        print(f"[ERROR] DOCX 양식 파일을 찾을 수 없습니다: {args.docx_template}")
-        sys.exit(1)
-
     os.makedirs(args.output_dir, exist_ok=True)
 
     # 1단계: 투자계약서 데이터 추출
     print("=" * 60)
-    print("[1/4] 투자계약서 데이터 추출 중...")
+    print("[1/3] 투자계약서 데이터 추출 중...")
     contract_data = extract_contract_data(args.contract)
     print(f"  회사명: {contract_data.company_name}")
     print(f"  투자금액: {contract_data.total_investment}원")
@@ -155,7 +135,7 @@ def main():
 
     # 2단계: 투심보고서 데이터 추출
     print()
-    print("[2/4] 투자심사보고서 데이터 추출 중...")
+    print("[2/3] 투자심사보고서 데이터 추출 중...")
     report_data = extract_report_data(args.report)
 
     # 2-1단계: 수동 확정 정보 주입 (--company-name / --company-data / --enrich)
@@ -173,55 +153,21 @@ def main():
     company_short = report_data.company_name or contract_data.company_name
     company_short = company_short.replace('㈜', '').replace('주식회사', '').replace('(주)', '').strip()
 
-    # 3단계: DOCX 체크리스트 생성
+    # 3단계: 준법감시보고서(준법사항체크리스트) 생성
     print()
-    print("[3/4] 투자계약서 체크리스트 DOCX 생성 중...")
-    docx_output = os.path.join(
-        args.output_dir,
-        f"투자계약서 체크리스트 및 의무기재사항확인서_{company_short}.docx"
-    )
-    warnings = generate_docx_checklist(
-        contract_data, report_data, args.docx_template, docx_output
-    )
-
-    # 4단계: 준법감시보고서(준법사항체크리스트) 생성
-    print()
-    print("[4/4] 준법감시보고서(준법사항체크리스트) 생성 중...")
+    print("[3/3] 준법감시보고서(준법사항체크리스트) 생성 중...")
     fund_short = report_data.fund_name or "펀드"
-    # HWPX 는 항상 먼저 생성 (docx 변환의 원본이 됨)
     hwpx_output = os.path.join(
         args.output_dir,
         f"준법사항체크리스트_{fund_short}_{company_short}.hwpx"
     )
     generate_hwpx_checklist(contract_data, report_data, hwpx_output)
 
-    compliance_docx_output = None
-    if args.compliance_format in ("docx", "both"):
-        compliance_docx_output = os.path.join(
-            args.output_dir,
-            f"준법감시보고서_{fund_short}_{company_short}.docx"
-        )
-        print("  → 한컴 COM 으로 DOCX 변환 중...")
-        ok = convert_hwpx_to_docx(hwpx_output, compliance_docx_output)
-        if not ok:
-            print("  [주의] DOCX 변환 실패 — HWPX 파일만 사용 가능합니다.")
-            compliance_docx_output = None
-        # docx-only 모드면 중간 HWPX 제거
-        if args.compliance_format == "docx" and compliance_docx_output and os.path.exists(hwpx_output):
-            os.remove(hwpx_output)
-            hwpx_output = None
-
     # 완료 요약
     print()
     print("=" * 60)
     print("생성 완료!")
-    print(f"  투자계약서 체크리스트(DOCX): {docx_output}")
-    if compliance_docx_output:
-        print(f"  준법감시보고서(DOCX): {compliance_docx_output}")
-    if hwpx_output:
-        print(f"  준법사항체크리스트(HWPX): {hwpx_output}")
-    if warnings:
-        print(f"\n  ⚠ {len(warnings)}건의 데이터 불일치가 발견되었습니다. 주석을 확인하세요.")
+    print(f"  준법사항체크리스트(HWPX): {hwpx_output}")
     print("=" * 60)
 
 

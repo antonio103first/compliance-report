@@ -8,7 +8,7 @@
     {
       "name": "compliance-report",
       "source": "./plugins/compliance-report",
-      "description": "준법감시보고서 작성 — 케이런7호 투자건의 투자계약서·투자심사보고서로부터 「준법사항체크리스트(준법감시보고서)」 HWPX 와 「투자계약서 체크리스트」 DOCX 를 자동 생성",
+      "description": "준법감시보고서 작성 — 케이런7호 투자건의 투자계약서·투자심사보고서로부터 「준법사항체크리스트(준법감시보고서)」 HWPX 를 자동 생성",
       "version": "1.0.0"
     }
   ]
