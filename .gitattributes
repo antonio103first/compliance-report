@@ -1,0 +1,14 @@
+# 한글/워드 양식은 바이너리 — 줄바꿈 변환 금지 (손상 방지)
+*.hwpx binary
+*.hwp  binary
+*.docx binary
+*.xlsx binary
+
+# 스크립트 줄바꿈 고정
+*.sh  text eol=lf
+*.bat text eol=crlf
+
+# 소스/문서는 기본 처리
+*.py  text
+*.md  text
+*.json text
