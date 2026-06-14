@@ -1,166 +1,216 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""사업자등록번호(+회사명)로 벤처기업·이노비즈·메인비즈 인증을 조회한다.
+"""벤처기업·이노비즈/메인비즈 해당여부를 회사명(+주소)으로 확정해 표4를 채운다.
 
-표4(벤처기업 등 해당여부) 자동 판정용. 공공데이터포털(data.go.kr) Open API 를
-사업자등록번호를 키로 호출하고, 회사명은 결과 교차검증(상호 불일치 경고)에 쓴다.
+공개 데이터(벤처기업명단·혁신형중소기업)에는 사업자등록번호가 없고 대표자명도
+마스킹되어 있어 **회사명 + 주소(시군구)** 로만 매칭한다. 준법문서 원칙상
+**유일하게 매칭되고 유효기간 내인 경우에만 '적(Y)'** 으로 확정하고, 모호하면
+비워 두고 경고를 남겨 담당자가 확정하게 한다.
 
-준법문서 임의주입 금지 원칙: 공적 출처에서 확인된 값만 주입하며, 키/엔드포인트가
-없으면 아무 것도 바꾸지 않는다(빈 dict 반환).
+── 데이터 소스 ──
+  · 벤처기업: data.go.kr 벤처기업명단(15084581) odcloud API → 로컬 캐시(JSON)
+  · 이노비즈/메인비즈: 혁신형중소기업현황(3033893) CSV (수동 다운로드)
 
 ── 환경변수 ──
-  DATA_GO_KR_SERVICE_KEY : data.go.kr 일반 인증키(Decoding 키 권장)
-  VENTURE_API_URL        : 벤처기업확인서 API 요청 URL (활용가이드 기준, 예: https://apis.data.go.kr/.../getVntrCmpList)
-  INNOBIZ_API_URL        : 혁신형중소기업(이노비즈/메인비즈) API 요청 URL (선택)
-  CERT_BIZNO_PARAM       : 사업자번호 파라미터명 (기본 'bizrno')
-
-⚠ 엔드포인트/응답 필드명은 각 API 활용가이드(예: data.go.kr/data/15106235
-  벤처기업확인서)에서 확정해 위 환경변수로 주입한다. 키 발급 후 실제 응답으로 검증.
+  DATA_GO_KR_CORP_KEY (또는 DATA_GO_KR_VENTURE_KEY) : 벤처기업명단 캐시 갱신용 서비스키
+  VENTURE_CACHE_PATH : 벤처 명단 캐시 파일 경로 (기본 ./_data/venture_list.json)
+  INNOBIZ_CSV_PATH   : 혁신형중소기업 CSV 경로 (기본 ./_data/innobiz.csv)
 """
 import os
 import re
+import csv
 import json
+import datetime
 from urllib.parse import urlencode
-from urllib.request import urlopen, Request
+from urllib.request import urlopen
 
-DEFAULT_TIMEOUT = 10
+VENTURE_NS = "15084581/v1"
+ODCLOUD_BASE = "https://api.odcloud.kr/api"
+SWAGGER_URL = "https://infuser.odcloud.kr/oas/docs?namespace=" + VENTURE_NS
 
-
-def _digits(s):
-    return re.sub(r'\D', '', s or '')
+DEFAULT_VENTURE_CACHE = os.path.join(".", "_data", "venture_list.json")
+DEFAULT_INNOBIZ_CSV = os.path.join(".", "_data", "innobiz.csv")
 
 
 def _slim(s):
-    return re.sub(r'[\s()（）㈜·.,\-]|주식회사', '', s or '')
+    return re.sub(r'[\s()（）㈜·.,\-]|주식회사|\(주\)', '', s or '')
 
 
-def _http_json(url, timeout):
-    req = Request(url, headers={'User-Agent': 'compliance-report/1.0'})
-    with urlopen(req, timeout=timeout) as r:
-        raw = r.read().decode('utf-8', 'replace')
+def _addr_tokens(addr):
+    """주소에서 시/도 + 시군구 토큰(앞 2개)을 뽑아 매칭 키로 쓴다."""
+    toks = re.sub(r'[,()]', ' ', addr or '').split()
+    return [t for t in toks[:2] if len(t) >= 2]
+
+
+def _key():
+    return (os.environ.get('DATA_GO_KR_VENTURE_KEY')
+            or os.environ.get('DATA_GO_KR_CORP_KEY') or '')
+
+
+def _today():
+    return datetime.date.today()
+
+
+def _parse_date(s):
+    m = re.search(r'(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})', str(s or ''))
+    if not m:
+        return None
     try:
-        return json.loads(raw)
-    except Exception:
-        return {'_raw': raw}
+        return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
 
 
-def _items(payload):
-    """data.go.kr 표준 응답(response.body.items.item)에서 item 리스트 추출."""
-    try:
-        body = payload['response']['body']
-        items = body.get('items') or {}
-        it = items.get('item') if isinstance(items, dict) else items
-        if it is None:
-            return []
-        return it if isinstance(it, list) else [it]
-    except Exception:
-        # 비표준 구조: 최상위 list 또는 data 키
-        if isinstance(payload, list):
-            return payload
-        for k in ('data', 'items', 'list'):
-            v = payload.get(k) if isinstance(payload, dict) else None
-            if isinstance(v, list):
-                return v
-        return []
+# ───────────────────── 벤처기업명단 캐시 ─────────────────────
+
+def _pick_venture_path(key, timeout=20):
+    """swagger 의 여러 uddi 중 데이터가 가장 많은(최신) 경로를 고른다."""
+    spec = json.loads(urlopen(SWAGGER_URL, timeout=timeout).read().decode('utf-8', 'replace'))
+    best, best_cnt = None, -1
+    for p in spec.get("paths", {}):
+        q = urlencode({"page": 1, "perPage": 1, "serviceKey": key})
+        try:
+            d = json.loads(urlopen(f"{ODCLOUD_BASE}{p}?{q}", timeout=timeout).read().decode('utf-8', 'replace'))
+            c = int(d.get("totalCount", 0))
+        except Exception:
+            c = 0
+        if c > best_cnt:
+            best, best_cnt = p, c
+    return best, best_cnt
 
 
-def _find_expiry(item):
-    """item dict 에서 유효기간/종료일 추정값(YYYY.MM.DD)을 찾는다."""
-    for k, v in item.items():
-        if v and re.search(r'(end|만료|종료|유효|expr|expire)', str(k), re.I):
-            m = re.search(r'\d{4}[.\-]\d{1,2}[.\-]\d{1,2}', str(v))
-            if m:
-                return m.group(0)
-    return ''
+def refresh_venture_cache(cache_path=None, *, service_key=None, per_page=1000,
+                          timeout=40, max_records=None):
+    """벤처기업명단 전체를 받아 회사명 인덱스 JSON 으로 저장. 저장 건수 반환."""
+    key = service_key or _key()
+    if not key:
+        raise RuntimeError("서비스키 없음 (DATA_GO_KR_CORP_KEY)")
+    cache_path = cache_path or os.environ.get('VENTURE_CACHE_PATH', DEFAULT_VENTURE_CACHE)
+    path, total = _pick_venture_path(key, timeout)
+    if not path:
+        raise RuntimeError("벤처기업명단 uddi 탐색 실패")
+
+    recs, page = [], 1
+    while True:
+        q = urlencode({"page": page, "perPage": per_page, "serviceKey": key})
+        d = json.loads(urlopen(f"{ODCLOUD_BASE}{path}?{q}", timeout=timeout).read().decode('utf-8', 'replace'))
+        data = d.get("data", [])
+        if not data:
+            break
+        for r in data:
+            # 스냅샷마다 컬럼명이 다름(간략주소/주소(현재본사주소), 벤처유효종료일/유효종료일 등)
+            # → 부분일치로 견고하게 추출
+            def pick(*subs):
+                for k in r:
+                    kk = str(k).replace(" ", "")
+                    if any(s in kk for s in subs):
+                        v = str(r[k]).strip()
+                        if v:
+                            return v
+                return ""
+            recs.append({
+                "name": pick("업체명", "기업명", "회사명"),
+                "addr": pick("주소"),
+                "type": pick("확인유형"),
+                "start": pick("유효시작"),
+                "end": pick("유효종료"),
+            })
+        if len(data) < per_page or (max_records and len(recs) >= max_records):
+            break
+        page += 1
+
+    index = {}
+    for r in recs:
+        index.setdefault(_slim(r["name"]), []).append(r)
+    os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump({"_count": len(recs), "_source": path, "index": index},
+                  f, ensure_ascii=False)
+    return len(recs)
 
 
-def _find_name(item):
-    for k, v in item.items():
-        if v and re.search(r'(상호|법인명|기업명|회사|cmpNm|corpNm|bizNm)', str(k), re.I):
-            return str(v)
-    return ''
+def lookup_venture(name, address="", cache_path=None):
+    """회사명(+주소)으로 벤처 명단 캐시를 조회. 유일·유효 매칭만 확정."""
+    cache_path = cache_path or os.environ.get('VENTURE_CACHE_PATH', DEFAULT_VENTURE_CACHE)
+    if not name or not os.path.exists(cache_path):
+        return {}
+    with open(cache_path, encoding="utf-8") as f:
+        index = json.load(f).get("index", {})
+    cands = index.get(_slim(name), [])
+    if not cands:
+        return {}  # 명단에 없음 → 미확정(기본 부 유지)
+    if len(cands) > 1 and address:
+        at = _addr_tokens(address)
+        narrowed = [c for c in cands if at and all(t in (c["addr"] or "") for t in at)]
+        if narrowed:
+            cands = narrowed
+    if len(cands) != 1:
+        return {"_warnings": [f"벤처 명단 매칭 모호({len(cands)}건): {name} — 담당자 확인"]}
+    c = cands[0]
+    end = _parse_date(c["end"])
+    if end and end < _today():
+        return {"_warnings": [f"벤처확인 유효기간 만료({c['end']}): {name} — 담당자 확인"]}
+    return {"is_venture": "Y", "venture_expiry": c["end"], "_venture_type": c["type"]}
 
 
-def _query(url, key, bn, timeout, bizno_param):
-    """공공데이터포털 표준 GET 호출 → item 리스트 반환(없으면 [])."""
-    q = urlencode({
-        'serviceKey': key,
-        'pageNo': 1,
-        'numOfRows': 10,
-        'returnType': 'json',
-        '_type': 'json',
-        bizno_param: bn,
-    })
-    return _items(_http_json(f'{url}?{q}', timeout))
+# ───────────────────── 이노비즈/메인비즈 CSV ─────────────────────
+
+def lookup_innobiz(name, address="", csv_path=None):
+    """혁신형중소기업현황 CSV(회사명·대표·업종·지역·유효기간)에서 회사명 매칭."""
+    csv_path = csv_path or os.environ.get('INNOBIZ_CSV_PATH', DEFAULT_INNOBIZ_CSV)
+    if not name or not os.path.exists(csv_path):
+        return {}
+    target = _slim(name)
+    hits = []
+    with open(csv_path, encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            vals = {(k or "").strip(): (v or "").strip() for k, v in row.items()}
+            nm = next((vals[k] for k in vals if k in ("사업자명", "기업명", "회사명", "업체명")), "")
+            if nm and _slim(nm) == target:
+                hits.append(vals)
+    if not hits:
+        return {}
+    if len(hits) > 1 and address:
+        at = _addr_tokens(address)
+        narrowed = [h for h in hits
+                    if at and any(t in " ".join(h.values()) for t in at)]
+        if narrowed:
+            hits = narrowed
+    if len(hits) != 1:
+        return {"_warnings": [f"이노비즈 매칭 모호({len(hits)}건): {name} — 담당자 확인"]}
+    h = hits[0]
+    expiry = next((h[k] for k in h if "유효" in k or "기간" in k), "")
+    return {"is_innobiz": "Y", "innobiz_expiry": expiry}
 
 
-def lookup(biz_no, company_name='', *, service_key=None, timeout=DEFAULT_TIMEOUT):
-    """(사업자번호, 회사명) → 인증 dict.
+# ───────────────────── 통합 ─────────────────────
 
-    반환 키(가능 시): is_venture('Y'/'N'), venture_expiry,
-    is_innobiz('Y'/'N'), innobiz_expiry, _warnings(list)
-    키/엔드포인트 미설정 시 빈 dict.
-    """
-    out = {}
+def enrich_report(report_data, *, venture_cache=None, innobiz_csv=None):
+    """회사명(+주소)로 벤처·이노비즈 조회 → 표4 필드(is_venture/is_innobiz) 확정.
+
+    유일·유효 매칭만 'Y' 로 채우고, 모호/만료/미발견은 그대로 둔다(경고 반환)."""
     warnings = []
-    key = service_key or os.environ.get('DATA_GO_KR_SERVICE_KEY', '')
-    bn = _digits(biz_no)
-    if not key or len(bn) != 10:
-        return out  # 인증키 없거나 사업자번호 불완전 → 조회 생략
+    addr = getattr(report_data, 'address', '') or ''
 
-    bizno_param = os.environ.get('CERT_BIZNO_PARAM', 'bizrno')
+    v = lookup_venture(report_data.company_name, addr, venture_cache)
+    if v.get("is_venture") == "Y":
+        report_data.is_venture = "Y"
+        if v.get("venture_expiry"):
+            report_data.venture_expiry = v["venture_expiry"]
+    warnings += v.get("_warnings", [])
 
-    # ── 벤처기업확인서 ──
-    vurl = os.environ.get('VENTURE_API_URL', '')
-    if vurl:
-        try:
-            items = _query(vurl, key, bn, timeout, bizno_param)
-            if items:
-                out['is_venture'] = 'Y'
-                exp = _find_expiry(items[0])
-                if exp:
-                    out['venture_expiry'] = exp
-                nm = _find_name(items[0])
-                if company_name and nm and _slim(company_name) not in _slim(nm) \
-                        and _slim(nm) not in _slim(company_name):
-                    warnings.append(f'벤처 상호 불일치: 보고서={company_name} / API={nm}')
-            else:
-                out['is_venture'] = 'N'
-        except Exception as e:  # noqa: BLE001
-            warnings.append(f'벤처기업 조회 실패: {e}')
+    i = lookup_innobiz(report_data.company_name, addr, innobiz_csv)
+    if i.get("is_innobiz") == "Y":
+        report_data.is_innobiz = "Y"
+        if i.get("innobiz_expiry"):
+            report_data.innobiz_expiry = i["innobiz_expiry"]
+    warnings += i.get("_warnings", [])
 
-    # ── 혁신형중소기업 (이노비즈/메인비즈) ──
-    iurl = os.environ.get('INNOBIZ_API_URL', '')
-    if iurl:
-        try:
-            items = _query(iurl, key, bn, timeout, bizno_param)
-            if items:
-                out['is_innobiz'] = 'Y'
-                exp = _find_expiry(items[0])
-                if exp:
-                    out['innobiz_expiry'] = exp
-            else:
-                out['is_innobiz'] = 'N'
-        except Exception as e:  # noqa: BLE001
-            warnings.append(f'혁신형중소기업 조회 실패: {e}')
-
-    if warnings:
-        out['_warnings'] = warnings
-    return out
+    return warnings
 
 
-# report_data 에 주입할 필드 (cert dict 키 → report_data 속성명)
-_APPLY_FIELDS = ('is_venture', 'venture_expiry', 'is_innobiz', 'innobiz_expiry')
-
-
-def enrich_report(report_data, *, service_key=None):
-    """report_data.business_registration + company_name 으로 조회해 표4 필드를 채운다.
-
-    조회 성공한 필드만 덮어쓴다(빈 값/미조회는 유지). 경고 리스트를 반환.
-    """
-    res = lookup(report_data.business_registration,
-                 report_data.company_name, service_key=service_key)
-    for f in _APPLY_FIELDS:
-        if res.get(f):
-            setattr(report_data, f, res[f])
-    return res.get('_warnings', [])
+if __name__ == "__main__":  # 캐시 갱신 CLI: python -m extractors.cert_enricher refresh
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "refresh":
+        n = refresh_venture_cache()
+        print(f"벤처기업명단 캐시 저장: {n}건")

@@ -79,24 +79,40 @@ python "<SKILL_DIR>/generate_checklists.py" \
 `establishment_date`, `business_registration`, `corp_reg_number`, `industry_code`,
 `business_description`, `contract_date`. **미상 필드는 빈칸으로 남아** 준법감시인이 직접 채운다.
 
-#### 표4(벤처기업 등) 자동 판정 — `--cert-enrich`
+#### 표1·표6·창업판정 자동 — `--corp-enrich`
 
-투심보고서 **회사개요에 사업자등록번호**를 기재해 두면, `--cert-enrich` 로 사업자번호(+회사명)를
-키 삼아 공공데이터포털 API 를 조회해 **벤처기업·이노비즈/메인비즈** 해당여부를 표4에 자동 반영한다.
-(창업기업은 설립일로부터 7년 자동 계산) 회사명은 조회 결과 상호 대조용이며, 불일치 시 경고만 출력한다.
+회사개요에 **사업자등록번호**를 기재해 두면, 금융위 기업기본정보 API로 설립일·법인등록번호·
+대표자·주소·업종을 보완한다(창업기업은 설립일→7년 자동). `bzno`(사업자번호)로 정확 조회된다.
 
 ```bash
-# data.go.kr 인증키·엔드포인트는 환경변수로 주입 (활용가이드 기준)
-export DATA_GO_KR_SERVICE_KEY="...(Decoding 키)"
-export VENTURE_API_URL="https://apis.data.go.kr/.../벤처기업확인서엔드포인트"
-export INNOBIZ_API_URL="https://apis.data.go.kr/.../혁신형중소기업엔드포인트"   # 선택
+export DATA_GO_KR_CORP_KEY="...(data.go.kr 서비스키)"
 python "<SKILL_DIR>/generate_checklists.py" \
-  --contract "투자계약서.docx" --report "투심보고서.docx" \
-  --cert-enrich --output-dir ./output
+  --contract 계약서.docx --report 투심.docx --corp-enrich --output-dir ./output
 ```
 
-> 키/엔드포인트 미설정 시 `--cert-enrich` 는 아무 것도 바꾸지 않는다(조회 생략). 준법문서 원칙상
-> **공적 출처에서 확인된 값만 주입**한다.
+#### 표4(벤처기업 등) 자동 판정 — `--cert-enrich`
+
+공개 데이터(벤처기업명단·혁신형중소기업)에는 **사업자번호가 없어 회사명+주소로 매칭**한다.
+**유일하게 매칭되고 유효기간 내인 경우에만 '적(Y)'** 확정, 모호/만료/미발견은 비워 두고 경고를 남긴다.
+창업기업은 설립일로 자동 판정된다.
+
+- **벤처기업**: data.go.kr 벤처기업명단(15084581) odcloud API를 받아 **로컬 캐시**로 매칭.
+  먼저 캐시를 1회 생성/갱신: `DATA_GO_KR_CORP_KEY=... python -m extractors.cert_enricher refresh`
+  → `./_data/venture_list.json` (약 4만 건)
+- **이노비즈/메인비즈**: 혁신형중소기업현황(3033893) **CSV를 직접 다운로드**해 경로 지정
+  (`INNOBIZ_CSV_PATH=./_data/innobiz.csv`). API가 없어 파일 매칭만 가능.
+
+```bash
+export DATA_GO_KR_CORP_KEY="...(data.go.kr 서비스키)"
+python -m extractors.cert_enricher refresh          # 벤처 명단 캐시 1회 생성
+export VENTURE_CACHE_PATH="./_data/venture_list.json"
+export INNOBIZ_CSV_PATH="./_data/innobiz.csv"        # (선택) 이노비즈/메인비즈 CSV
+python "<SKILL_DIR>/generate_checklists.py" \
+  --contract 계약서.docx --report 투심.docx --corp-enrich --cert-enrich --output-dir ./output
+```
+
+> 캐시/CSV 미설정 시 `--cert-enrich` 는 아무 것도 바꾸지 않는다. 준법문서 원칙상
+> **유일·유효 매칭만 확정**하고 애매하면 담당자가 직접 확인하도록 비워 둔다.
 
 ### 4단계 — 결과 보고
 
