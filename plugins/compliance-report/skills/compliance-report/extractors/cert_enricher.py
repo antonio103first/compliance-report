@@ -399,36 +399,52 @@ def enrich_report(report_data, *, venture_cache=None, innobiz_csv=None, refresh=
         warnings.append(f"[인증 자료 기준일] 벤처 {va or '?'} / 이노비즈·메인비즈 {ia or '?'}")
     addr = getattr(report_data, 'address', '') or ''
 
+    web_on = os.environ.get('CERT_WEB_FALLBACK', '1') != '0'
+
+    # ── 벤처기업: 3-state (Y 확인 / N 명단 없음 / "" 모호·만료) ──
     v = lookup_venture(report_data.company_name, addr, venture_cache)
     if v.get("is_venture") == "Y":
         report_data.is_venture = "Y"
         if v.get("venture_expiry"):
             report_data.venture_expiry = v["venture_expiry"]
-    warnings += v.get("_warnings", [])
+    elif not v:                       # 최신 명단(월 갱신)에 없음 → 미해당(부)
+        report_data.is_venture = "N"
+    else:                             # 동명이인·만료 등 → 미확정(공란)
+        report_data.is_venture = ""
+        warnings += v.get("_warnings", [])
 
+    # ── 이노비즈/메인비즈: 로컬 캐시 → 이노비즈넷 실시간 보완, 3-state ──
     rep = getattr(report_data, 'representative', '') or ''
     i = lookup_innobiz(report_data.company_name, addr, rep, innobiz_csv)
-    # 로컬 캐시(스냅샷)가 확정 못하면(미발견/만료/모호) 이노비즈넷 실시간 조회로 보완
-    if i.get("is_innobiz") != "Y" and os.environ.get('CERT_WEB_FALLBACK', '1') != '0':
+    wj = {}
+    if i.get("is_innobiz") != "Y" and web_on:
         wj = lookup_innobiz_web(report_data.company_name, rep, addr)
         if wj.get("is_innobiz") == "Y":
-            i = wj
             warnings.append(f"이노비즈: 이노비즈넷 실시간 확인 (유효 ~{wj.get('innobiz_expiry')})")
-        elif wj.get("_warnings"):
-            warnings += wj["_warnings"]
+
     if i.get("is_innobiz") == "Y":
         report_data.is_innobiz = "Y"
         if i.get("innobiz_expiry"):
             report_data.innobiz_expiry = i["innobiz_expiry"]
-    elif os.environ.get('CERT_WEB_FALLBACK', '1') != '0':
-        # 메인비즈는 공개 인증조회가 없어, 협회 회원 검색을 '힌트'로만 제시(자동확정 X)
-        mb = mainbiz_member_web(report_data.company_name)
-        if mb.get("member_hits"):
-            br = mb["member_hits"][0].get("branch", "")
-            warnings.append(
-                f"메인비즈(참고): 협회 회원 검색됨{(' · ' + br) if br else ''} — "
-                f"회원≠인증, 중소벤처24에서 인증 확인 필요: {MAINBIZ_PUBLIC}")
-    warnings += i.get("_warnings", [])
+    elif wj.get("is_innobiz") == "Y":
+        report_data.is_innobiz = "Y"
+        if wj.get("innobiz_expiry"):
+            report_data.innobiz_expiry = wj["innobiz_expiry"]
+    else:
+        # 로컬·실시간 모두 '명확히 없음'({})이면 미해당(부), 모호/만료/조회실패면 공란
+        local_clean = (i == {})
+        web_clean = web_on and (wj == {})
+        report_data.is_innobiz = "N" if (local_clean and web_clean) else ""
+        warnings += i.get("_warnings", [])
+        warnings += wj.get("_warnings", [])
+        # 메인비즈는 공개 인증조회가 없어, 협회 회원검색을 '힌트'로만(자동확정 X)
+        if web_on:
+            mb = mainbiz_member_web(report_data.company_name)
+            if mb.get("member_hits"):
+                br = mb["member_hits"][0].get("branch", "")
+                warnings.append(
+                    f"메인비즈(참고): 협회 회원 검색됨{(' · ' + br) if br else ''} — "
+                    f"회원≠인증, 중소벤처24에서 인증 확인 필요: {MAINBIZ_PUBLIC}")
 
     return warnings
 

@@ -85,14 +85,17 @@ def _build_all_replacements(cd, rd) -> dict:
         pen_parts.append(f" - 주식매수청구권 : 투자원금 및 {cd.buyback_rate}%")
     pen_text = " ".join(pen_parts)
 
-    # ── 표4: 벤처기업 해당여부 (적/부 판단) ──
-    # 창업기업: 설립일 기준 7년 이내
-    startup_yn = _check_startup(rd.establishment_date)
+    # ── 표4: 벤처기업 등 해당여부 (검토결과: 적/부 中 하나, 미확정이면 공란) ──
+    # 3-state 값 "Y"(적)/"N"(부)/""(공란). 각 행은 셀 단위로 하나만 표시.
     estab_str = rd.establishment_date or "0000년 00월 00일"
-    # 벤처기업
-    venture_yn = "적(Y)" if rd.is_venture == "Y" else "부(N)"
-    # 이노비즈
-    innobiz_yn = "적(Y)" if rd.is_innobiz == "Y" else "부(N)"
+    # 창업기업: 설립일 알면 7년 기준 적/부, 모르면 공란
+    if rd.establishment_date:
+        startup_state = "Y" if "적" in _check_startup(rd.establishment_date) else "N"
+    else:
+        startup_state = ""
+    # 벤처/이노비즈: cert_enricher 가 채운 3-state(Y/N/"") 그대로 사용
+    venture_state = rd.is_venture if rd.is_venture in ("Y", "N") else ""
+    innobiz_state = rd.is_innobiz if rd.is_innobiz in ("Y", "N") else ""
 
     # ── 표5: 준법사항 (적/부 판단) ──
     # 이해관계인 (계약서에서)
@@ -300,7 +303,7 @@ def _build_all_replacements(cd, rd) -> dict:
             'iss_price': iss_price,
             'ratio': ratio,
         },
-        '_yn_markers': [startup_yn, venture_yn, innobiz_yn],
+        '_table4_states': [startup_state, venture_state, innobiz_state],
         '_table5_yn': table5_yn,
         '_invest_method_checks': invest_method_checks,
         '_bigo_notes': legal_bigo + regulatory_bigo,
@@ -320,7 +323,6 @@ def _apply_replacements(text: str, replacements: dict) -> str:
     simple = replacements.get('_simple', {})
     ordered = replacements.get('_ordered', {})
     conditions = replacements.get('_conditions', {})
-    yn_markers = replacements.get('_yn_markers', [])
 
     # 1. 단순 치환 (빈 문자열로의 치환도 허용 — 미상 필드는 placeholder를 비운다)
     for old_val, new_val in simple.items():
@@ -382,28 +384,38 @@ def _apply_replacements(text: str, replacements: dict) -> str:
     if t2.get('ratio'):
         text = re.sub(r'>%<', '>' + _xml_safe(t2['ratio']) + '<', text, count=1)
 
-    # 4. 표4 적(Y)/부(N) 치환
-    # 같은 셀 내에 적(Y)와 부(N)이 별도 <hp:p> 태그에 있음
-    # 선택된 값 → 적색(charPrIDRef=156), 비선택 값 → 텍스트 제거
-    for yn_val in yn_markers:
-        if '적' in yn_val:
-            # 적(Y)를 적색으로 표시 (기울임 없음)
-            text = text.replace(
-                'charPrIDRef="52"><hp:t>적(Y)</hp:t>',
-                f'charPrIDRef="{RED_CHARPR_ID}"><hp:t>적(Y)</hp:t>',
-                1
-            )
-            # 부(N) 텍스트 제거
-            text = text.replace('>부(N)</hp:t>', '></hp:t>', 1)
-        else:
-            # 부(N)를 적색으로 표시 (기울임 없음)
-            text = text.replace(
-                'charPrIDRef="52"><hp:t>부(N)</hp:t>',
-                f'charPrIDRef="{RED_CHARPR_ID}"><hp:t>부(N)</hp:t>',
-                1
-            )
-            # 적(Y) 텍스트 제거
-            text = text.replace('>적(Y)</hp:t>', '></hp:t>', 1)
+    # 4. 표4 검토결과(창업/벤처/이노비즈) — 셀 단위로 적(Y)/부(N) 중 하나만, 미확정은 공란
+    # 표4 영역의 "적(Y)·부(N)이 함께 든 셀" 3개를 순서대로(창업·벤처·이노비즈) 채운다.
+    # (전역 치환은 앞 행 선택값을 뒷 행이 지우는 문제가 있어 셀 단위로 처리)
+    table4_states = replacements.get('_table4_states', [])
+    if table4_states:
+        s4 = text.find("4. 투자기업의 벤처기업")
+        e4 = text.find("5. 준법사항", s4) if s4 >= 0 else -1
+        if s4 >= 0 and e4 >= 0:
+            region = text[s4:e4]
+            out, last, idx = [], 0, 0
+            for m in re.finditer(r'<hp:tc\b.*?</hp:tc>', region, re.DOTALL):
+                cell = m.group(0)
+                if ('<hp:t>적(Y)</hp:t>' in cell and '<hp:t>부(N)</hp:t>' in cell
+                        and idx < len(table4_states)):
+                    st = table4_states[idx]
+                    idx += 1
+                    if st == "Y":
+                        cell = re.sub(r'charPrIDRef="\d+"(><hp:t>적\(Y\)</hp:t>)',
+                                      f'charPrIDRef="{RED_CHARPR_ID}"\\1', cell, count=1)
+                        cell = cell.replace('<hp:t>부(N)</hp:t>', '<hp:t></hp:t>', 1)
+                    elif st == "N":
+                        cell = re.sub(r'charPrIDRef="\d+"(><hp:t>부\(N\)</hp:t>)',
+                                      f'charPrIDRef="{RED_CHARPR_ID}"\\1', cell, count=1)
+                        cell = cell.replace('<hp:t>적(Y)</hp:t>', '<hp:t></hp:t>', 1)
+                    else:  # 공란
+                        cell = cell.replace('<hp:t>적(Y)</hp:t>', '<hp:t></hp:t>', 1)
+                        cell = cell.replace('<hp:t>부(N)</hp:t>', '<hp:t></hp:t>', 1)
+                out.append(region[last:m.start()])
+                out.append(cell)
+                last = m.end()
+            region = ''.join(out) + region[last:]
+            text = text[:s4] + region + text[e4:]
 
     # 4.5 투자방법 (O) 체크 - "(   )" 를 "(O)" 또는 유지
     method_checks = replacements.get('_invest_method_checks', [])
