@@ -120,10 +120,14 @@ def _build_all_replacements(cd, rd) -> dict:
     # ── 표5 준법사항: 적/부 순서 목록 (양식의 실제 칼럼 빈 셀 순서) ──
     committee_date = rd.committee_date or "(확인 필요)"
 
-    # 투자방법 판단
+    # 투자방법 판단 (제34조1항 비고 '투자방법' 5개 항목 매칭)
     stock_lower = (cd.stock_type or rd.stock_type or "").replace(" ", "")
-    is_stock_type = any(kw in stock_lower for kw in ['보통주', '우선주', 'RCPS'])
-    is_cb_bw = any(kw in stock_lower for kw in ['CB', 'BW', '전환사채', '신주인수권'])
+    _su = stock_lower.upper()
+    is_stock_type = any(kw in stock_lower for kw in ['보통주', '우선주', 'RCPS', 'CPS'])
+    is_cb_bw = any(kw in _su for kw in ['CB', 'BW']) \
+        or any(kw in stock_lower for kw in ['전환사채', '신주인수권', '교환사채'])
+    is_safe = 'SAFE' in _su or '조건부지분' in stock_lower
+    is_project = '프로젝트' in stock_lower
 
     table5_yn = [
         # ── 법령상 투자제한 (12개) ──
@@ -160,13 +164,15 @@ def _build_all_replacements(cd, rd) -> dict:
     ]
 
     # ── 투자방법 (O) 체크 ──
-    # 양식의 (   ) 5개: 신규주식, 무담보사채, 조건부, 창업자주식, 프로젝트
+    # 양식의 (   ) 5개: 신규주식인수, 무담보사채, 조건부지분(SAFE), 창업자주식, 프로젝트
+    # 투자형태에 매칭되는 항목에만 O (보통주/우선주→주식인수, CB/BW→무담보사채,
+    # SAFE→조건부지분, 프로젝트→프로젝트)
     invest_method_checks = [
         is_stock_type,   # 신규로 발행되는 주식의 인수
-        is_cb_bw,        # 무담보전환사채 등
-        False,           # 조건부지분인수계약
+        is_cb_bw,        # 무담보전환사채/신주인수권부사채/교환사채
+        is_safe,         # 조건부지분인수계약(SAFE)
         False,           # 개인/개인투자조합 3년 이상 보유 창업자 주식
-        False,           # 프로젝트 투자
+        is_project,      # 프로젝트 투자
     ]
 
     # ── 비고란 적색 주석 (colAddr=3 빈 셀에 순서대로 삽입) ──
@@ -206,20 +212,21 @@ def _build_all_replacements(cd, rd) -> dict:
     red_notes = {
         '(상세하게 발굴경위 기재)': rd.discovery_background or '(확인 필요)',
     }
-    # 제61조1항2호(TCB): 별첨2 해당 시에만 "▪ 본건 TCB 등급: ..." 를 비고 맨 밑줄에 작성
+    # 제61조1항2호(TCB): 양식 비고에 이미 '▪' 글머리가 있으므로 등급 텍스트만 채운다.
+    # 미해당이면 "본건 TCB 등급" 줄과 "(NICE평가정보, …)" 줄을 통째로 삭제한다.
+    remove_paras = []
     tcb_detail = rd.purpose_tcb_detail or ""
     if purpose_tcb == "적" and tcb_detail:
-        # "TI-3 등급(2025.8.28 발급)" → "▪ 본건 TCB 등급: TI-3 등급" + "2025.8.28 발급"
+        # "TI-3 등급(2025.8.28 발급)" → 등급 + 발급일 채움
         m = re.search(r'(TI-\d+)\s*등급.*?\(([\d.]+)\s*발급\)', tcb_detail)
         if m:
-            red_notes['본건 TCB　등급: TI-'] = f'▪ 본건 TCB 등급: {m.group(1)} 등급'
+            red_notes['본건 TCB　등급: TI-'] = f'본건 TCB 등급: {m.group(1)} 등급'
             red_notes['0000.00.00 발급'] = f'{m.group(2)} 발급'
         else:
-            red_notes['본건 TCB　등급: TI-'] = f'▪ 본건 TCB 등급: {tcb_detail}'
+            red_notes['본건 TCB　등급: TI-'] = f'본건 TCB 등급: {tcb_detail}'
     else:
-        # 미해당: TCB 등급 placeholder 비우기
-        red_notes['본건 TCB　등급: TI-'] = ''
-        red_notes['0000.00.00 발급'] = ''
+        # 미해당: 등급 줄(▪ 포함)과 NICE평가정보 줄을 문단째 삭제
+        remove_paras += ['본건 TCB', 'NICE평가정보']
     # 투심위 예정일
     red_notes['년  월 일'] = committee_date
 
@@ -302,6 +309,7 @@ def _build_all_replacements(cd, rd) -> dict:
         '_attach2': attach2,              # 별첨2(표6) 대상기업 정보
         '_ibk_o': (ibk_yn == "적"),       # 제61조1항1호(별첨5) 해당 → 비고 (O)
         '_bigo_appends': bigo_appends,    # 표5 조항 비고 셀 맨 밑줄 ▪ 근거
+        '_remove_paras': remove_paras,    # 미해당 시 문단째 삭제할 anchor
     }
 
 
@@ -548,6 +556,29 @@ def _apply_replacements(text: str, replacements: dict) -> str:
     # 제35조1항1·2·3호: 해당 조항 비고 셀 맨 밑줄에 "▪ 근거" 문단 추가
     for anchor, bullet in replacements.get('_bigo_appends', []):
         text = _inject_bigo_append(text, anchor, bullet)
+
+    # 8.6 미해당 항목의 placeholder 문단 삭제 (예: TCB 미해당 시 등급/NICE 줄)
+    for anchor in replacements.get('_remove_paras', []):
+        a = text.find(anchor)
+        if a < 0:
+            continue
+        ps = text.rfind('<hp:p ', 0, a)
+        pe = text.find('</hp:p>', a)
+        if ps >= 0 and pe >= 0:
+            text = text[:ps] + text[pe + len('</hp:p>'):]
+
+    # 8.7 제35조3호(남부권) 행: 양식의 적색 글자를 흑색으로 교정 (해당여부 무관)
+    _kw35 = '제35조 제1항 제3호의 투자 해당여부'
+    _ki = text.find(_kw35)
+    if _ki >= 0:
+        _ts = text.rfind('<hp:tr', 0, _ki)
+        _te = text.find('</hp:tr>', _ki)
+        if _ts >= 0 and _te >= 0:
+            _te += len('</hp:tr>')
+            _chunk = text[_ts:_te]
+            _chunk = _chunk.replace('charPrIDRef="127"', 'charPrIDRef="32"')
+            _chunk = _chunk.replace('charPrIDRef="132"', 'charPrIDRef="74"')
+            text = text[:_ts] + _chunk + text[_te:]
 
     # 9. 별첨2(표6) 대상기업 정보 치환 + 담당자확인 셀 비우기
     #    양식의 별첨2 placeholder를 deal 회사 정보로 교체. 인정여부(여신/외환/수신
