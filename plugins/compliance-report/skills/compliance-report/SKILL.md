@@ -79,6 +79,25 @@ python "<SKILL_DIR>/generate_checklists.py" \
 `establishment_date`, `business_registration`, `corp_reg_number`, `industry_code`,
 `business_description`, `contract_date`. **미상 필드는 빈칸으로 남아** 준법감시인이 직접 채운다.
 
+#### 표4(벤처기업 등) 자동 판정 — `--cert-enrich`
+
+투심보고서 **회사개요에 사업자등록번호**를 기재해 두면, `--cert-enrich` 로 사업자번호(+회사명)를
+키 삼아 공공데이터포털 API 를 조회해 **벤처기업·이노비즈/메인비즈** 해당여부를 표4에 자동 반영한다.
+(창업기업은 설립일로부터 7년 자동 계산) 회사명은 조회 결과 상호 대조용이며, 불일치 시 경고만 출력한다.
+
+```bash
+# data.go.kr 인증키·엔드포인트는 환경변수로 주입 (활용가이드 기준)
+export DATA_GO_KR_SERVICE_KEY="...(Decoding 키)"
+export VENTURE_API_URL="https://apis.data.go.kr/.../벤처기업확인서엔드포인트"
+export INNOBIZ_API_URL="https://apis.data.go.kr/.../혁신형중소기업엔드포인트"   # 선택
+python "<SKILL_DIR>/generate_checklists.py" \
+  --contract "투자계약서.docx" --report "투심보고서.docx" \
+  --cert-enrich --output-dir ./output
+```
+
+> 키/엔드포인트 미설정 시 `--cert-enrich` 는 아무 것도 바꾸지 않는다(조회 생략). 준법문서 원칙상
+> **공적 출처에서 확인된 값만 주입**한다.
+
 ### 4단계 — 결과 보고
 
 생성 경로를 안내하고, 2단계에서 출력된 **데이터 불일치·미상 항목**을 사용자에게 요약 보고한다.
@@ -93,6 +112,7 @@ python "<SKILL_DIR>/generate_checklists.py" \
 | `--company-name` | 회사명 직접 지정 (추출 실패 시) |
 | `--company-data` | 확정 회사정보 JSON 주입 |
 | `--enrich` | 확정 사업자번호로 bizno.net 보완 |
+| `--cert-enrich` | 투심보고서 회사개요의 **사업자등록번호(+회사명)** 로 벤처기업·이노비즈/메인비즈 인증을 공공데이터포털 API 조회하여 **표4 자동 채움** |
 
 ## 생성 문서 구성 (준법사항체크리스트)
 

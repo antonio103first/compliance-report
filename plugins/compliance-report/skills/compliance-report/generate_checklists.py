@@ -109,6 +109,12 @@ def main():
         help="--company-data 에 business_registration 이 있으면 bizno.net 조회로 "
              "비어있는 설립일·주소·KSIC 등을 보완 (확정 사업자번호 기준)"
     )
+    parser.add_argument(
+        "--cert-enrich", action="store_true",
+        help="투심보고서 회사개요의 사업자등록번호(+회사명)로 벤처기업·이노비즈/메인비즈 "
+             "인증을 공공데이터포털 API 조회하여 표4를 자동 채움 "
+             "(환경변수 DATA_GO_KR_SERVICE_KEY / VENTURE_API_URL / INNOBIZ_API_URL 필요)"
+    )
     args = parser.parse_args()
 
     # 파일 존재 확인
@@ -140,6 +146,14 @@ def main():
 
     # 2-1단계: 수동 확정 정보 주입 (--company-name / --company-data / --enrich)
     _apply_overrides(args, contract_data, report_data)
+
+    # 2-2단계: 인증 자동조회 (--cert-enrich) — 사업자번호+회사명으로 벤처/이노비즈 판정
+    if args.cert_enrich:
+        from extractors.cert_enricher import enrich_report as _cert_enrich
+        for w in _cert_enrich(report_data):
+            print(f"  [cert] ⚠ {w}")
+        print(f"  [cert] 벤처기업={report_data.is_venture or '-'} "
+              f"이노비즈/메인비즈={report_data.is_innobiz or '-'}")
 
     print(f"  회사명: {report_data.company_name}")
     print(f"  대표이사: {report_data.representative}")

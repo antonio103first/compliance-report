@@ -110,6 +110,24 @@ def extract_report_data(filepath: str) -> InvestmentReportData:
         _extract_appendix5(doc.tables, data)
     _extract_certifications(full_text, data)
 
+    # 사업자등록번호 글로벌 fallback: 회사개요 라벨이 비표준이어도 표 전체에서 패턴 탐색
+    if not data.business_registration:
+        m = re.search(r'\b(\d{3}-\d{2}-\d{5})\b', full_text)
+        if m:
+            data.business_registration = m.group(1)
+        elif doc:
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        mm = re.search(r'(\d{3}-\d{2}-\d{5})', cell.text)
+                        if mm:
+                            data.business_registration = mm.group(1)
+                            break
+                    if data.business_registration:
+                        break
+                if data.business_registration:
+                    break
+
     return data
 
 
