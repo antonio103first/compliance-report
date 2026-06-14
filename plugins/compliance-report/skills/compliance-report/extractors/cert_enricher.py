@@ -22,8 +22,22 @@ import csv
 import json
 import time
 import datetime
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from urllib.request import urlopen, Request
+
+# 공개 조회(애매한 매칭 fallback) 링크
+VENTURE_PUBLIC = "https://www.smes.go.kr/venturein/pbntc/searchVntrCmp?cmpNm="
+INNOBIZ_PUBLIC = "https://www.innobiz.net"
+MAINBIZ_PUBLIC = "https://www.mainbiz.go.kr"
+
+
+def venture_verify_link(name):
+    """벤처확인 공시 공개조회 딥링크(회사명 사전 필터)."""
+    return VENTURE_PUBLIC + quote(name or "")
+
+
+def innobiz_verify_link(name):
+    return f"{INNOBIZ_PUBLIC} / {MAINBIZ_PUBLIC} (회사명: {name})"
 
 VENTURE_NS = "15084581/v1"
 ODCLOUD_BASE = "https://api.odcloud.kr/api"
@@ -70,19 +84,19 @@ def _parse_date(s):
 # ───────────────────── 벤처기업명단 캐시 ─────────────────────
 
 def _pick_venture_path(key, timeout=20):
-    """swagger 의 여러 uddi 중 데이터가 가장 많은(최신) 경로를 고른다."""
+    """swagger 의 여러 월별 스냅샷 uddi 중 **기준일자가 가장 최신**인 경로를 고른다.
+    (각 uddi summary 에 '..._YYYYMMDD' 기준일자가 들어있음. 건수가 아니라 날짜로 선택)"""
     spec = json.loads(urlopen(SWAGGER_URL, timeout=timeout).read().decode('utf-8', 'replace'))
-    best, best_cnt = None, -1
-    for p in spec.get("paths", {}):
-        q = urlencode({"page": 1, "perPage": 1, "serviceKey": key})
-        try:
-            d = json.loads(urlopen(f"{ODCLOUD_BASE}{p}?{q}", timeout=timeout).read().decode('utf-8', 'replace'))
-            c = int(d.get("totalCount", 0))
-        except Exception:
-            c = 0
-        if c > best_cnt:
-            best, best_cnt = p, c
-    return best, best_cnt
+    best, best_date = None, ""
+    for p, ops in spec.get("paths", {}).items():
+        desc = ""
+        for _m, info in ops.items():
+            desc = info.get("summary", "") or info.get("description", "")
+        md = re.search(r'(20\d{6})', desc)
+        date = md.group(1) if md else ""
+        if date and date > best_date:
+            best, best_date = p, date
+    return best, best_date
 
 
 def refresh_venture_cache(cache_path=None, *, service_key=None, per_page=1000,
@@ -92,7 +106,7 @@ def refresh_venture_cache(cache_path=None, *, service_key=None, per_page=1000,
     if not key:
         raise RuntimeError("서비스키 없음 (DATA_GO_KR_CORP_KEY)")
     cache_path = cache_path or os.environ.get('VENTURE_CACHE_PATH', DEFAULT_VENTURE_CACHE)
-    path, total = _pick_venture_path(key, timeout)
+    path, as_of = _pick_venture_path(key, timeout)
     if not path:
         raise RuntimeError("벤처기업명단 uddi 탐색 실패")
 
@@ -130,7 +144,7 @@ def refresh_venture_cache(cache_path=None, *, service_key=None, per_page=1000,
         index.setdefault(_slim(r["name"]), []).append(r)
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump({"_count": len(recs), "_source": path, "index": index},
+        json.dump({"_count": len(recs), "_as_of": as_of, "_source": path, "index": index},
                   f, ensure_ascii=False)
     return len(recs)
 
@@ -151,11 +165,11 @@ def lookup_venture(name, address="", cache_path=None):
         if narrowed:
             cands = narrowed
     if len(cands) != 1:
-        return {"_warnings": [f"벤처 명단 매칭 모호({len(cands)}건): {name} — 담당자 확인"]}
+        return {"_warnings": [f"벤처 명단 매칭 모호({len(cands)}건): {name} — 공개조회: {venture_verify_link(name)}"]}
     c = cands[0]
     end = _parse_date(c["end"])
     if end and end < _today():
-        return {"_warnings": [f"벤처확인 유효기간 만료({c['end']}): {name} — 담당자 확인"]}
+        return {"_warnings": [f"벤처확인 유효기간 만료({c['end']}): {name} — 공개조회: {venture_verify_link(name)}"]}
     return {"is_venture": "Y", "venture_expiry": c["end"], "_venture_type": c["type"]}
 
 
@@ -170,6 +184,8 @@ def refresh_innobiz_cache(cache_path=None, *, timeout=60):
     m = re.search(r'fileDownload\.do\?atchFileId=(\w+)&fileDetailSn=(\d+)', page)
     if not m:
         raise RuntimeError("혁신형중소기업 다운로드 링크 탐색 실패")
+    md = re.search(r'혁신형\s*중소기업[^<\n]*?(20\d{6})', page) or re.search(r'(20\d{6})', page)
+    as_of = md.group(1) if md else ""
     dl = f"{INNOBIZ_DL}?atchFileId={m.group(1)}&fileDetailSn={m.group(2)}&insertDataPrcus=N"
     raw = urlopen(Request(dl, headers=_UA), timeout=timeout).read()
 
@@ -204,7 +220,7 @@ def refresh_innobiz_cache(cache_path=None, *, timeout=60):
             count += 1
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump({"_count": count, "index": index}, f, ensure_ascii=False)
+        json.dump({"_count": count, "_as_of": as_of, "index": index}, f, ensure_ascii=False)
     return count
 
 
@@ -227,11 +243,11 @@ def lookup_innobiz(name, address="", representative="", cache_path=None):
         if narrowed:
             hits = narrowed
     if len(hits) != 1:
-        return {"_warnings": [f"이노비즈/메인비즈 매칭 모호({len(hits)}건): {name} — 담당자 확인"]}
+        return {"_warnings": [f"이노비즈/메인비즈 매칭 모호({len(hits)}건): {name} — 공개조회: {innobiz_verify_link(name)}"]}
     h = hits[0]
     end = _parse_date(h.get("expiry"))
     if end and end < _today():
-        return {"_warnings": [f"{h['cert']} 확인기간 만료({h.get('expiry')}): {name} — 담당자 확인"]}
+        return {"_warnings": [f"{h['cert']} 확인기간 만료({h.get('expiry')}): {name} — 공개조회: {innobiz_verify_link(name)}"]}
     return {"is_innobiz": "Y", "innobiz_expiry": h.get("expiry", ""), "_cert_type": h.get("cert")}
 
 
@@ -242,6 +258,16 @@ def _stale(path, max_age_days):
     if not os.path.exists(path):
         return True
     return (time.time() - os.path.getmtime(path)) / 86400.0 > max_age_days
+
+
+def _cache_asof(path):
+    """캐시의 원천 자료 기준일(_as_of, YYYYMMDD) → 'YYYY-MM-DD'."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            v = json.load(f).get("_as_of", "")
+        return f"{v[0:4]}-{v[4:6]}-{v[6:8]}" if len(v) == 8 else (v or "")
+    except Exception:
+        return ""
 
 
 def auto_refresh(venture_cache=None, innobiz_cache=None, *, max_age_days=None):
@@ -274,6 +300,11 @@ def enrich_report(report_data, *, venture_cache=None, innobiz_csv=None, refresh=
     warnings = []
     if refresh:
         warnings += auto_refresh(venture_cache, innobiz_csv)
+    vc = venture_cache or os.environ.get('VENTURE_CACHE_PATH', DEFAULT_VENTURE_CACHE)
+    ic = innobiz_csv or os.environ.get('INNOBIZ_CACHE_PATH', DEFAULT_INNOBIZ_CACHE)
+    va, ia = _cache_asof(vc), _cache_asof(ic)
+    if va or ia:
+        warnings.append(f"[인증 자료 기준일] 벤처 {va or '?'} / 이노비즈·메인비즈 {ia or '?'}")
     addr = getattr(report_data, 'address', '') or ''
 
     v = lookup_venture(report_data.company_name, addr, venture_cache)
