@@ -51,6 +51,8 @@ class InvestmentContractData:
     delay_rate: str = ""
     redemption_rate: str = ""
 
+    special_terms: str = ""   # 특약사항 조항 한줄 요약
+
     warnings: list = field(default_factory=list)
 
 
@@ -86,6 +88,7 @@ def extract_contract_data(filepath: str) -> InvestmentContractData:
     _extract_penalty_rates(full_text, data)
     _extract_preferred_stock_terms(full_text, data)
     _extract_fund_usage(full_text, doc, data)
+    _extract_special_terms(full_text, data)
     return data
 
 
@@ -456,6 +459,62 @@ def _extract_fund_usage(full_text: str, doc, data: InvestmentContractData):
     m = re.search(r'별지\s*\d+.*?투자금.*?사용.*?용도\s*\n(.+)', full_text)
     if m:
         data.fund_usage = m.group(1).strip()
+
+
+# ━━━━━━━━━━━━━━━━━━ 특약사항 ━━━━━━━━━━━━━━━━━━
+
+def _summarize_special(text: str, limit: int = 90) -> str:
+    """특약 조항 본문을 한 줄로 간결히 압축한다(룰 기반 fallback).
+
+    도입 상투구("본 계약과 관련하여 … 다음 각 호의 특약을 둔다")·조문 제목·항호 번호를
+    제거하고 한 줄로 줄인 뒤 길면 자른다.
+    ※ 정교한 1줄 요약은 스킬 호출 시 Claude 가 --special-terms 로 직접 작성한다.
+    """
+    t = re.sub(r'제\s*\d+\s*조\s*[\(（][^)）]*[\)）]', '', text)   # 제N조(특약사항) 제거
+    # 도입 상투구 제거
+    t = re.sub(r'본\s*계약(?:과\s*관련하여|상|에\s*따라)?\s*', '', t)
+    t = re.sub(r'(?:양\s*)?당사자(?:들)?\s*(?:은|는|간(?:에|의)?)\s*', '', t)
+    t = re.sub(r'다음\s*각\s*호(?:의|에)?\s*(?:특약|약정|사항)?(?:을|를)?\s*'
+               r'(?:둔다|정한다|약정한다|합의한다)\.?', '', t)
+    t = re.sub(r'아래(?:와\s*같이)?\s*', '', t)
+    t = re.sub(r'[①-⑳]', ' ', t)                                  # 동그라미 번호
+    t = re.sub(r'(?m)^\s*(?:\d+|[가-힣])\s*[.\)]\s*', ' ', t)      # 1. / 가. 번호
+    # 간결화: 선두 주어 생략, 서술어 명사화(추진하며→추진, 부여한다→부여)
+    t = re.sub(r'^\s*(?:회사|투자자|이해관계인|당사자(?:들)?)\s*(?:은|는|가)\s*', '', t)
+    t = re.sub(r'(?:하며|하고|하되)\s*,?\s*', ', ', t)
+    t = re.sub(r'(?:하여야\s*한다|해야\s*한다|한다|된다|함)(?=\s|,|\.|$)', '', t)
+    t = re.sub(r'\s+', ' ', t).strip(' ·-,.')
+    if len(t) > limit:
+        cut = t[:limit]
+        for sep in ('. ', ', ', ' '):
+            p = cut.rfind(sep)
+            if p > limit * 0.6:
+                cut = cut[:p]
+                break
+        t = cut.rstrip(' ·-,.') + '…'
+    return t
+
+
+def _extract_special_terms(full_text: str, data: InvestmentContractData):
+    """본계약 본문(제1~N조)에 특약사항(특별약정 등) 조항이 있으면 추출해 한 줄 요약.
+    ※ 뒤쪽 별지/별첨(진술과보장·투자금용도·퇴사제한·경업금지약정 등)은 제외한다."""
+    # 본문만 대상: 첫 (별지)/(별첨)/서명여백 마커 앞까지로 자름
+    cut = re.search(r'[\(（]\s*별\s*지|[\(（]\s*별\s*첨|\[다음\s*페이지|이하\s*여백', full_text)
+    body_text = full_text[:cut.start()] if cut else full_text
+    for kw in ('특약사항', '특별약정', '특별 약정', '부속약정', '기타 약정'):
+        # "제N조(특약사항…)" 또는 단독 소제목(줄 시작)만 — 본문 중간 '특약' 언급은 제외
+        m = re.search(r'제\s*\d+\s*조\s*[\(（]\s*' + re.escape(kw), body_text)
+        if not m:
+            m = re.search(r'(?:^|\n)\s*' + re.escape(kw) + r'\s*(?:[:：\n]|$)', body_text)
+        if not m:
+            continue
+        rest = body_text[m.end():]
+        nxt = re.search(r'\n\s*제\s*\d+\s*조[\s(（]', rest)
+        body = body_text[m.start(): m.end() + (nxt.start() if nxt else 1500)]
+        summary = _summarize_special(body)
+        if len(summary) >= 4:
+            data.special_terms = summary
+            return
 
 
 # ━━━━━━━━━━━━━━━━━━ 유틸 ━━━━━━━━━━━━━━━━━━

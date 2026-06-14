@@ -71,6 +71,8 @@ def _build_all_replacements(cd, rd) -> dict:
         extras.append(cd.refixing_terms.replace("Refixing: ", ""))
     if cd.other_terms:
         extras.append(cd.other_terms)
+    if getattr(cd, 'special_terms', ''):
+        extras.append(f"특약사항: {cd.special_terms}")
     if extras:
         cond_parts.append(f" - 기타 : {', '.join(extras)} 등")
     cond_text = " ".join(cond_parts)

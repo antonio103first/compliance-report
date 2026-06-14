@@ -100,6 +100,11 @@ def main():
         help="회사명 수동 지정 (계약서·투심보고서에서 추출 실패 시, 예: ㈜AAA)"
     )
     parser.add_argument(
+        "--special-terms", default=None,
+        help="특약사항 한줄 요약 수동 지정(스킬 호출 시 Claude가 작성). 미지정 시 "
+             "계약서의 특약 조항을 자동 추출·압축한다."
+    )
+    parser.add_argument(
         "--company-data", default=None,
         help="확정 회사정보 JSON 파일 경로. 사업자번호·설립일·주소·법인번호·KSIC 등 "
              "문서에 없는 값을 수동 확정 주입 (준법문서 임의주입 금지 규칙 준수)"
@@ -135,6 +140,10 @@ def main():
     print("=" * 60)
     print("[1/3] 투자계약서 데이터 추출 중...")
     contract_data = extract_contract_data(args.contract)
+    if args.special_terms:
+        contract_data.special_terms = args.special_terms.strip()
+    if contract_data.special_terms:
+        print(f"  특약사항(요약): {contract_data.special_terms}")
     print(f"  회사명: {contract_data.company_name}")
     print(f"  투자금액: {contract_data.total_investment}원")
     print(f"  투자단가: {contract_data.issue_price}원")
