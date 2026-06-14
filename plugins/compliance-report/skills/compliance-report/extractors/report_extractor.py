@@ -58,7 +58,11 @@ class InvestmentReportData:
     purpose_south: str = ""            # 주목적 - 산업은행 남부권 전략산업
     purpose_tcb: str = ""              # 주목적 - TCB Ti-6 등급 이상
     purpose_tcb_detail: str = ""       # TCB 상세 (등급, 발급일)
-    purpose_ibk: str = ""              # 주목적 - 중소기업은행 거래기업
+    purpose_ibk: str = ""              # 제61조1항1호 - 중소기업은행 신규/기존거래 (별첨5)
+    purpose_transport_detail: str = ""  # 별첨2 국토교통 비고(근거)
+    purpose_mobility_detail: str = ""   # 별첨2 모빌리티 비고(근거)
+    purpose_south_detail: str = ""      # 별첨2 남부권 비고(근거)
+    purpose_ibk_detail: str = ""        # 별첨5 IBK 신규/기존거래 인정 사유
 
     # 벤처기업/이노비즈 인증
     is_venture: str = ""               # 벤처기업 인증 여부
@@ -100,9 +104,10 @@ def extract_report_data(filepath: str) -> InvestmentReportData:
         if not data.co_investors:
             _extract_co_investors_table(doc.tables, data)
 
-    # 별첨2 투자재원검토보고서 + 벤처/이노비즈 인증
+    # 별첨2 투자재원검토보고서 + 별첨5 IBK + 벤처/이노비즈 인증
     if doc:
         _extract_appendix2(doc.tables, data)
+        _extract_appendix5(doc.tables, data)
     _extract_certifications(full_text, data)
 
     return data
@@ -565,13 +570,36 @@ def _extract_co_investors_table(tables, data: InvestmentReportData):
         break
 
 
+_YN_TOKENS = {'해당', '미해당', 'O', 'X', '가능', '불가', '적합', '부적합', '아님'}
+
+
 def _find_yn_value(cells: list) -> str:
     """셀 목록에서 해당/미해당/O/X 값을 찾아 반환."""
-    valid = {'해당', '미해당', 'O', 'X', '가능', '불가', '적합', '부적합', '아님'}
     for c in cells:
         c_clean = c.strip()
-        if c_clean in valid:
+        if c_clean in _YN_TOKENS:
             return c_clean
+    return ""
+
+
+def _find_appendix_bigo(cells: list, yn_val: str, label_kw: str) -> str:
+    """별첨2/별첨5 행에서 비고(근거) 셀 텍스트를 추출.
+    yn 값·라벨·빈칸·머지 중복을 제외하고 실질 내용 셀을 반환한다."""
+    seen = []
+    for c in cells:
+        c = re.sub(r'\s+', ' ', c.replace('\xa0', ' ')).strip()
+        if c and (not seen or seen[-1] != c):
+            seen.append(c)
+    for c in seen:
+        if c == yn_val or c in _YN_TOKENS:
+            continue
+        if label_kw and label_kw in c:
+            continue
+        if '주목적' in c or '투자 여부' in c or '투자여부' in c:
+            continue
+        if len(c) < 2:
+            continue
+        return c
     return ""
 
 
@@ -599,14 +627,20 @@ def _extract_appendix2(tables, data: InvestmentReportData):
             # 주목적 - 국토교통분야
             if '국토교통' in row_text and not data.purpose_transport:
                 data.purpose_transport = _find_yn_value(cells)
+                data.purpose_transport_detail = _find_appendix_bigo(
+                    cells, data.purpose_transport, '국토교통')
 
             # 주목적 - 혁신성장 모빌리티
             if '모빌리티' in row_text and not data.purpose_mobility:
                 data.purpose_mobility = _find_yn_value(cells)
+                data.purpose_mobility_detail = _find_appendix_bigo(
+                    cells, data.purpose_mobility, '모빌리티')
 
             # 주목적 - 남부권 전략산업
             if '남부권' in row_text and not data.purpose_south:
                 data.purpose_south = _find_yn_value(cells)
+                data.purpose_south_detail = _find_appendix_bigo(
+                    cells, data.purpose_south, '남부권')
 
             # 주목적 - TCB
             if ('TCB' in row_text or 'Ti-' in row_text or 'TI-' in row_text) and '투자대상' not in row_text:
@@ -641,6 +675,28 @@ def _extract_appendix2(tables, data: InvestmentReportData):
                     if m:
                         data.industry_code = m.group(1)
                         return
+
+
+def _extract_appendix5(tables, data: InvestmentReportData):
+    """별첨5: 제61조1항1호 — 중소기업은행 신규/기존거래 기업 해당여부+사유 추출.
+
+    '중소기업은행' + '신규' + '기존(거래)' 를 포함한 행에서 O/X(해당/미해당)와
+    인정 사유를 추출한다. (별첨5 표 또는 본문 요약표 어디든 탐색)
+    """
+    if data.purpose_ibk:
+        return
+    for table in tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells]
+            row_text = " ".join(cells)
+            if '중소기업은행' in row_text and '신규' in row_text \
+                    and ('기존거래' in row_text or '기존 거래' in row_text):
+                yn = _find_yn_value(cells)
+                if yn:
+                    data.purpose_ibk = yn
+                    data.purpose_ibk_detail = _find_appendix_bigo(
+                        cells, yn, '중소기업은행')
+                    return
 
 
 def _extract_certifications(full_text: str, data: InvestmentReportData):

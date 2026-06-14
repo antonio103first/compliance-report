@@ -108,6 +108,8 @@ def _build_all_replacements(cd, rd) -> dict:
     purpose_mobility = _yn(rd.purpose_mobility)
     purpose_south = _yn(rd.purpose_south)
     purpose_tcb = _yn(rd.purpose_tcb)
+    # 제61조1항1호 IBK(별첨5): 추출값 있으면 그에 따르고, 없으면 기존 기본 '적'
+    ibk_yn = _yn(rd.purpose_ibk) if rd.purpose_ibk else "적"
     # 투자구분 (신규/구주)
     is_new_stock = "신규" in (rd.investment_type or "") or "신주" in (cd.stock_type or "")
     # 해외투자 여부 (국내 주소면 부)
@@ -142,7 +144,7 @@ def _build_all_replacements(cd, rd) -> dict:
         purpose_transport,   # 제35조 제1항 제1호 (국토교통분야)
         purpose_mobility,    # 제35조 제1항 제2호 (혁신성장 모빌리티)
         purpose_south,       # 제35조 제1항 제3호 (남부권 전략산업)
-        "적",                # 제61조 제1항 제1호 (IBK 기업거래)
+        ibk_yn,              # 제61조 제1항 제1호 (IBK 신규/기존거래, 별첨5)
         purpose_tcb,         # 제61조 제1항 제2호 (TCB Ti-6 등급)
         "적",    # 제34조 제3항 동일기업 동일 프로젝트
         "적",    # 제34조 제4항 후행투자 (담당자 확인)
@@ -194,7 +196,6 @@ def _build_all_replacements(cd, rd) -> dict:
         '제34조 제10항에 의한 금지행위 여부',
         '제34조의 2 제1항의 이해상충여부 검토 여부',
         '제61조 제14항의 볼커룰',
-        '제61조 제1항 제1호의 투자 해당여부',  # 투자의무4
     ]
 
     # ── 투자의무4 비고란 주석 ──
@@ -205,20 +206,35 @@ def _build_all_replacements(cd, rd) -> dict:
     red_notes = {
         '(상세하게 발굴경위 기재)': rd.discovery_background or '(확인 필요)',
     }
-    # 10번: TCB 등급 비고란 - "본건 TCB 등급: TI-" 뒤에 실제 등급 삽입
+    # 제61조1항2호(TCB): 별첨2 해당 시에만 "▪ 본건 TCB 등급: ..." 를 비고 맨 밑줄에 작성
     tcb_detail = rd.purpose_tcb_detail or ""
-    if tcb_detail:
-        # "TI-3 등급(2025.8.28 발급)" → "본건 TCB 등급: TI-3 등급(2025.8.28 발급)"
-        # 양식에서 "본건 TCB　등급: TI-" 다음의 빈 부분과 "0000.00.00 발급" 치환
+    if purpose_tcb == "적" and tcb_detail:
+        # "TI-3 등급(2025.8.28 발급)" → "▪ 본건 TCB 등급: TI-3 등급" + "2025.8.28 발급"
         m = re.search(r'(TI-\d+)\s*등급.*?\(([\d.]+)\s*발급\)', tcb_detail)
         if m:
-            red_notes['본건 TCB\u3000등급: TI-'] = f'본건 TCB 등급: {m.group(1)} 등급'
+            red_notes['본건 TCB　등급: TI-'] = f'▪ 본건 TCB 등급: {m.group(1)} 등급'
             red_notes['0000.00.00 발급'] = f'{m.group(2)} 발급'
         else:
-            red_notes['본건 TCB\u3000등급: TI-'] = f'본건 TCB 등급: {tcb_detail}'
-    # 투자의무4는 전체 적색 처리 (별도 확인 필요 삭제)
+            red_notes['본건 TCB　등급: TI-'] = f'▪ 본건 TCB 등급: {tcb_detail}'
+    else:
+        # 미해당: TCB 등급 placeholder 비우기
+        red_notes['본건 TCB　등급: TI-'] = ''
+        red_notes['0000.00.00 발급'] = ''
     # 투심위 예정일
     red_notes['년  월 일'] = committee_date
+
+    # ── 제35조1항1·2·3호 비고 셀 맨 밑줄 "▪ 근거" 추가 (별첨2 해당 시) ──
+    # anchor = 각 조항 비고 셀의 기존 "투자대상 : ..." 텍스트
+    bigo_appends = []
+    if purpose_transport == "적" and (rd.purpose_transport_detail or "").strip():
+        bigo_appends.append(('투자대상 : 국토교통',
+                             '▪ ' + rd.purpose_transport_detail.strip()))
+    if purpose_mobility == "적" and (rd.purpose_mobility_detail or "").strip():
+        bigo_appends.append(('투자대상 : 혁신성장',
+                             '▪ ' + rd.purpose_mobility_detail.strip()))
+    if purpose_south == "적" and (rd.purpose_south_detail or "").strip():
+        bigo_appends.append(('투자대상 : 남부권',
+                             '▪ ' + rd.purpose_south_detail.strip()))
 
     # ── 별첨2 (표6) 대상기업 정보 치환 ──
     # 양식의 별첨2 placeholder([대표이사]·[설립일] 등)를 deal 회사 정보로 교체한다.
@@ -284,6 +300,8 @@ def _build_all_replacements(cd, rd) -> dict:
         '_red_full_rows': red_full_rows,  # 전체 적색 표시할 행 키워드
         '_red_notes': red_notes,
         '_attach2': attach2,              # 별첨2(표6) 대상기업 정보
+        '_ibk_o': (ibk_yn == "적"),       # 제61조1항1호(별첨5) 해당 → 비고 (O)
+        '_bigo_appends': bigo_appends,    # 표5 조항 비고 셀 맨 밑줄 ▪ 근거
     }
 
 
@@ -520,6 +538,17 @@ def _apply_replacements(text: str, replacements: dict) -> str:
             # keyword를 note로 완전 교체 (중복 방지)
             text = text.replace(keyword, safe_note, 1)
 
+    # 8.5 표5 조항 비고 셀 — 별첨2/별첨5 근거 반영
+    # 제61조1항1호: 별첨5 해당 시 비고 "투자대상 : 중소기업은행 …" 끝에 (O)
+    #   (확인서 제목 등 다른 occurrence 보호 위해 표5 비고 셀 텍스트만 단건 치환)
+    if replacements.get('_ibk_o'):
+        text = text.replace(
+            '투자대상 : 중소기업은행 신규 및 기존거래 기업',
+            '투자대상 : 중소기업은행 신규 및 기존거래 기업 (O)', 1)
+    # 제35조1항1·2·3호: 해당 조항 비고 셀 맨 밑줄에 "▪ 근거" 문단 추가
+    for anchor, bullet in replacements.get('_bigo_appends', []):
+        text = _inject_bigo_append(text, anchor, bullet)
+
     # 9. 별첨2(표6) 대상기업 정보 치환 + 담당자확인 셀 비우기
     #    양식의 별첨2 placeholder를 deal 회사 정보로 교체. 인정여부(여신/외환/수신
     #    Y/N)·증빙서류 셀은 담당자 확인 항목이므로 비워 둔다.
@@ -538,6 +567,51 @@ def _apply_replacements(text: str, replacements: dict) -> str:
             text = head + tail
 
     return text
+
+
+def _inject_bigo_append(text: str, anchor: str, bullet: str) -> str:
+    """anchor 텍스트를 포함한 표5 비고 셀(<hp:tc>)의 맨 밑줄에 새 문단(▪ 근거)을 추가.
+
+    셀 내 첫 문단(<hp:p>, anchor 보유)을 복제해 paraPr/charPr/run 구조를 그대로
+    물려받고, lineSeg 레이아웃 캐시는 제거(한컴이 열 때 재계산 → 복구모드 방지)한
+    뒤 텍스트를 bullet 로 교체하여 마지막 문단 뒤에 삽입한다. 멱등(이미 동일 bullet
+    이 있으면 재삽입하지 않음)."""
+    a = text.find(anchor)
+    if a < 0:
+        return text
+    tc_start = text.rfind('<hp:tc', 0, a)
+    tc_end = text.find('</hp:tc>', a)
+    if tc_start < 0 or tc_end < 0:
+        return text
+    tc_end += len('</hp:tc>')
+    tc = text[tc_start:tc_end]
+
+    safe = _xml_safe(bullet)
+    if f'<hp:t>{safe}</hp:t>' in tc:   # 멱등
+        return text
+
+    paras = list(re.finditer(r'<hp:p\b.*?</hp:p>', tc, re.DOTALL))
+    if not paras:
+        return text
+    template_p = paras[0].group(0)
+    # lineSeg 캐시 제거 (한컴 재계산)
+    new_p = re.sub(r'<hp:linesegarray>.*?</hp:linesegarray>', '', template_p, flags=re.DOTALL)
+    # 첫 <hp:t> 만 bullet 로, 나머지 run 텍스트는 비움
+    done = {'v': False}
+
+    def _set_t(m):
+        if not done['v']:
+            done['v'] = True
+            return '<hp:t>' + safe + '</hp:t>'
+        return '<hp:t></hp:t>'
+
+    new_p = re.sub(r'<hp:t>.*?</hp:t>', _set_t, new_p, flags=re.DOTALL)
+    if not done['v']:
+        return text   # 텍스트 노드가 없으면 포기
+
+    last_end = paras[-1].end()
+    new_tc = tc[:last_end] + new_p + tc[last_end:]
+    return text[:tc_start] + new_tc + text[tc_end:]
 
 
 def _fix_overshoot_linesegs(section_xml: str) -> str:
