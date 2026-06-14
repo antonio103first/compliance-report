@@ -278,6 +278,44 @@ def lookup_innobiz_web(name, representative="", address="", *, timeout=15):
             "_cert_type": "이노비즈", "_realtime": True}
 
 
+MAINBIZ_MEMBER_WEB = "https://www.mainbiz.or.kr/service/find_member.asp?stt="
+
+
+def mainbiz_member_web(name, *, timeout=15):
+    """메인비즈협회 회원사 조회(실시간).
+
+    ⚠ 메인비즈는 이노비즈넷 같은 공개 '인증(유효기간) 조회'가 없다. 이 엔드포인트는
+    **협회 회원사 명단(기업명·대표·소속지회)** 일 뿐 '회원 ≠ 메인비즈 인증' 이므로
+    자동 확정(적Y)에 쓰지 않고 담당자 확인용 힌트로만 반환한다."""
+    if not name:
+        return {}
+    qname = re.sub(r'주식회사|\(주\)|㈜|\(유\)|유한회사', ' ', name).strip() or name
+    try:
+        req = Request(MAINBIZ_MEMBER_WEB + quote(qname), headers={**_UA, "Referer": MAINBIZ_PUBLIC})
+        raw = urlopen(req, timeout=timeout).read()
+    except Exception:  # noqa: BLE001
+        return {}
+    html = None
+    for enc in ("euc-kr", "cp949", "utf-8-sig", "utf-8"):
+        try:
+            html = raw.decode(enc)
+            break
+        except Exception:
+            continue
+    if not html:
+        return {}
+    hits = []
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL):
+        tds = re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL)
+        if len(tds) < 3:
+            continue
+        cl = lambda s: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s)).strip()
+        nm, rep, branch = cl(tds[0]), cl(tds[1]), cl(tds[2])
+        if nm and _slim(nm) == _slim(name):
+            hits.append({"name": nm, "rep": rep, "branch": branch})
+    return {"member_hits": hits} if hits else {}
+
+
 def lookup_innobiz(name, address="", representative="", cache_path=None):
     """이노비즈/메인비즈 캐시에서 회사명 매칭(대표·지역으로 동명이인 보정)."""
     cache_path = cache_path or os.environ.get('INNOBIZ_CACHE_PATH', DEFAULT_INNOBIZ_CACHE)
@@ -382,6 +420,14 @@ def enrich_report(report_data, *, venture_cache=None, innobiz_csv=None, refresh=
         report_data.is_innobiz = "Y"
         if i.get("innobiz_expiry"):
             report_data.innobiz_expiry = i["innobiz_expiry"]
+    elif os.environ.get('CERT_WEB_FALLBACK', '1') != '0':
+        # 메인비즈는 공개 인증조회가 없어, 협회 회원 검색을 '힌트'로만 제시(자동확정 X)
+        mb = mainbiz_member_web(report_data.company_name)
+        if mb.get("member_hits"):
+            br = mb["member_hits"][0].get("branch", "")
+            warnings.append(
+                f"메인비즈(참고): 협회 회원 검색됨{(' · ' + br) if br else ''} — "
+                f"회원≠인증, 중소벤처24에서 인증 확인 필요: {MAINBIZ_PUBLIC}")
     warnings += i.get("_warnings", [])
 
     return warnings
