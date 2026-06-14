@@ -579,18 +579,35 @@ def _apply_replacements(text: str, replacements: dict) -> str:
         if ps >= 0 and pe >= 0:
             text = text[:ps] + text[pe + len('</hp:p>'):]
 
-    # 8.7 제35조3호(남부권) 행: 양식의 적색 글자를 흑색으로 교정 (해당여부 무관)
-    _kw35 = '제35조 제1항 제3호의 투자 해당여부'
-    _ki = text.find(_kw35)
-    if _ki >= 0:
-        _ts = text.rfind('<hp:tr', 0, _ki)
-        _te = text.find('</hp:tr>', _ki)
-        if _ts >= 0 and _te >= 0:
-            _te += len('</hp:tr>')
-            _chunk = text[_ts:_te]
-            _chunk = _chunk.replace('charPrIDRef="127"', 'charPrIDRef="32"')
-            _chunk = _chunk.replace('charPrIDRef="132"', 'charPrIDRef="74"')
-            text = text[:_ts] + _chunk + text[_te:]
+    # 8.7 제35조3호(남부권)·투자비율점검 투자의무3 → 양식의 적색 글자를 흑색으로
+    #     (해당여부 무관). 적색 charPr 가 다른 항목과 공유되므로 흑색 트윈으로 재지정.
+    twins = replacements.get('_black_twins', {})
+    if twins:
+        red_set = set(twins)
+        # (a) 표5 제35조3호 행: 행 내 적색 run 전부 흑색 (검토결과 적/부=157은 트윈 제외라 유지)
+        ki = text.find('제35조 제1항 제3호의 투자 해당여부')
+        if ki >= 0:
+            ts = text.rfind('<hp:tr', 0, ki)
+            te = text.find('</hp:tr>', ki)
+            if ts >= 0 and te >= 0:
+                te += len('</hp:tr>')
+                chunk = text[ts:te]
+                for r, b in twins.items():
+                    chunk = chunk.replace('charPrIDRef="%s"' % r, 'charPrIDRef="%s"' % b)
+                text = text[:ts] + chunk + text[te:]
+        # (b) 남부권/투자의무3 관련 개별 run(투자비율점검 표 포함)을 흑색으로
+        _kws = ('투자의무3', '남부권', '동남권', '서남권', '10,000백만원')
+
+        def _blk(m):
+            cid, attrs, body = m.group(1), m.group(2), m.group(3)
+            if cid not in red_set:
+                return m.group(0)
+            t = re.sub(r'<[^>]+>', '', ''.join(re.findall(r'<hp:t>(.*?)</hp:t>', body, re.DOTALL)))
+            if any(k in t for k in _kws):
+                return '<hp:run charPrIDRef="%s"%s>%s</hp:run>' % (twins[cid], attrs, body)
+            return m.group(0)
+
+        text = re.sub(r'<hp:run charPrIDRef="(\d+)"([^>]*)>(.*?)</hp:run>', _blk, text, flags=re.DOTALL)
 
     # 9. 별첨2(표6) 대상기업 정보 치환 + 담당자확인 셀 비우기
     #    양식의 별첨2 placeholder를 deal 회사 정보로 교체. 인정여부(여신/외환/수신
@@ -691,6 +708,16 @@ def _copy_and_replace(template_path: str, output_path: str, replacements: dict):
     with zipfile.ZipFile(template_path, 'r') as zin:
         modified = {}
 
+        # 검정 트윈 charPr 준비: 양식 원래 적색 charPr(156/157 제외)의 흑색 사본을 만들어
+        # 제35조3호·투자의무3(남부권) 글자만 흑색으로 재지정하기 위함. (트윈맵을 치환에 전달)
+        header = zin.read('Contents/header.xml').decode('utf-8', errors='replace')
+        red_ids = [i for i in re.findall(r'<hh:charPr\s+id="(\d+)"[^>]*textColor="#FF0000"', header)
+                   if i not in (RED_ITALIC_CHARPR_ID, RED_CHARPR_ID)]
+        header, twin_map = _add_black_twins(header, red_ids)
+        replacements['_black_twins'] = twin_map
+        header = _add_red_italic_charpr(header)
+        modified['Contents/header.xml'] = header.encode('utf-8')
+
         # section0.xml, PrvText.txt 치환
         for fname in ('Contents/section0.xml', 'Preview/PrvText.txt'):
             text = zin.read(fname).decode('utf-8', errors='replace')
@@ -700,11 +727,6 @@ def _copy_and_replace(template_path: str, output_path: str, replacements: dict):
                 # (캐시가 실제 텍스트보다 길면 한컴이 '복구' 모드로만 열린다)
                 text = _fix_overshoot_linesegs(text)
             modified[fname] = text.encode('utf-8')
-
-        # header.xml에 적색+기울임 charPr 추가 (id=156)
-        header = zin.read('Contents/header.xml').decode('utf-8', errors='replace')
-        header = _add_red_italic_charpr(header)
-        modified['Contents/header.xml'] = header.encode('utf-8')
 
         with zipfile.ZipFile(temp_path, 'w') as zout:
             for item in zin.infolist():
@@ -803,6 +825,36 @@ def _add_red_italic_charpr(header_xml: str) -> str:
             _bump, header_xml, count=1,
         )
     return header_xml
+
+
+def _add_black_twins(header_xml: str, red_ids):
+    """양식의 적색 charPr 들의 흑색 사본(트윈)을 header 에 추가하고 {적색id: 흑색id} 반환.
+    공유 charPr(투자의무3 ↔ 투자의무1/4 등) 때문에, 특정 글자만 흑색화할 때 사용."""
+    twin = {}
+    additions = []
+    for rid in dict.fromkeys(red_ids):  # 중복 제거, 순서 유지
+        m = re.search(r'<hh:charPr\s+id="%s"[\s>].*?</hh:charPr>' % re.escape(rid),
+                      header_xml, re.DOTALL)
+        if not m:
+            m = re.search(r'<hh:charPr\s+id="%s"[\s>][^>]*/>' % re.escape(rid), header_xml)
+        if not m:
+            continue
+        nid = str(int(rid) + 400)
+        while ('id="%s"' % nid) in header_xml or any(('id="%s"' % nid) in a for a in additions):
+            nid = str(int(nid) + 400)
+        block = re.sub(r'\bid="%s"' % re.escape(rid), 'id="%s"' % nid, m.group(0), count=1)
+        block = block.replace('textColor="#FF0000"', 'textColor="#000000"')
+        additions.append(block)
+        twin[rid] = nid
+    if additions:
+        header_xml = header_xml.replace(
+            '</hh:charProperties>', '\n'.join(additions) + '</hh:charProperties>', 1)
+
+        def _bump(mm):
+            return '%s%d%s' % (mm.group(1), int(mm.group(2)) + len(additions), mm.group(3))
+        header_xml = re.sub(r'(<hh:charProperties\b[^>]*\bitemCnt=")(\d+)(")',
+                            _bump, header_xml, count=1)
+    return header_xml, twin
 
 
 def _xml_safe(text: str) -> str:
