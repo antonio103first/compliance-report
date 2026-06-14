@@ -115,6 +115,12 @@ def main():
              "인증을 공공데이터포털 API 조회하여 표4를 자동 채움 "
              "(환경변수 DATA_GO_KR_SERVICE_KEY / VENTURE_API_URL / INNOBIZ_API_URL 필요)"
     )
+    parser.add_argument(
+        "--corp-enrich", action="store_true",
+        help="사업자등록번호(+회사명)로 금융위 기업기본정보 API 조회하여 설립일·법인등록번호·"
+             "대표자·주소·업종을 보완(표1·표6 + 창업기업 7년 자동판정). "
+             "(환경변수 DATA_GO_KR_CORP_KEY 필요)"
+    )
     args = parser.parse_args()
 
     # 파일 존재 확인
@@ -147,7 +153,15 @@ def main():
     # 2-1단계: 수동 확정 정보 주입 (--company-name / --company-data / --enrich)
     _apply_overrides(args, contract_data, report_data)
 
-    # 2-2단계: 인증 자동조회 (--cert-enrich) — 사업자번호+회사명으로 벤처/이노비즈 판정
+    # 2-2단계: 기업기본정보 자동조회 (--corp-enrich) — 설립일·법인번호·대표·주소·업종
+    if args.corp_enrich:
+        from extractors.corp_info_enricher import enrich_report as _corp_enrich
+        for w in _corp_enrich(report_data):
+            print(f"  [corp] ⚠ {w}")
+        print(f"  [corp] 설립일={report_data.establishment_date or '-'} "
+              f"법인등록번호={report_data.corp_reg_number or '-'}")
+
+    # 2-3단계: 인증 자동조회 (--cert-enrich) — 사업자번호+회사명으로 벤처/이노비즈 판정
     if args.cert_enrich:
         from extractors.cert_enricher import enrich_report as _cert_enrich
         for w in _cert_enrich(report_data):
