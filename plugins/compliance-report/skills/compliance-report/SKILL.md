@@ -96,23 +96,26 @@ python "<SKILL_DIR>/generate_checklists.py" \
 **유일하게 매칭되고 유효기간 내인 경우에만 '적(Y)'** 확정, 모호/만료/미발견은 비워 두고 경고를 남긴다.
 창업기업은 설립일로 자동 판정된다.
 
-- **벤처기업**: data.go.kr 벤처기업명단(15084581) odcloud API를 받아 **로컬 캐시**로 매칭.
-  먼저 캐시를 1회 생성/갱신: `DATA_GO_KR_CORP_KEY=... python -m extractors.cert_enricher refresh`
-  → `./_data/venture_list.json` (약 4만 건)
-- **이노비즈/메인비즈**: 혁신형중소기업현황(3033893) **CSV를 직접 다운로드**해 경로 지정
-  (`INNOBIZ_CSV_PATH=./_data/innobiz.csv`). API가 없어 파일 매칭만 가능.
+- **벤처기업**: data.go.kr 벤처기업명단(15084581) odcloud API → **로컬 캐시**(`_data/venture_list.json`,
+  약 4만 건)로 회사명+주소 매칭. 캐시 갱신에 `DATA_GO_KR_CORP_KEY` 필요.
+- **이노비즈/메인비즈**: 혁신형중소기업현황(3033893) zip을 **자동 다운로드**(인증키 불필요) →
+  `_data/innobiz.json`(이노비즈+메인비즈, 약 4.6만 건)로 회사명+대표·지역 매칭.
+
+**캐시는 자동 갱신**된다: `--cert-enrich` 실행 시 캐시가 없거나 `CERT_CACHE_MAX_AGE_DAYS`(기본 30일)
+보다 오래되면 자동 재다운로드한다(네트워크 실패 시 기존 캐시 사용). 수동 갱신도 가능:
 
 ```bash
-export DATA_GO_KR_CORP_KEY="...(data.go.kr 서비스키)"
-python -m extractors.cert_enricher refresh          # 벤처 명단 캐시 1회 생성
-export VENTURE_CACHE_PATH="./_data/venture_list.json"
-export INNOBIZ_CSV_PATH="./_data/innobiz.csv"        # (선택) 이노비즈/메인비즈 CSV
+export DATA_GO_KR_CORP_KEY="...(data.go.kr 서비스키)"   # 벤처 캐시 갱신용
+python -m extractors.cert_enricher refresh            # 벤처+이노비즈/메인비즈 모두 받기
+#   refresh venture / refresh innobiz 로 개별 갱신도 가능 (innobiz 는 키 불필요)
+
 python "<SKILL_DIR>/generate_checklists.py" \
   --contract 계약서.docx --report 투심.docx --corp-enrich --cert-enrich --output-dir ./output
 ```
 
-> 캐시/CSV 미설정 시 `--cert-enrich` 는 아무 것도 바꾸지 않는다. 준법문서 원칙상
-> **유일·유효 매칭만 확정**하고 애매하면 담당자가 직접 확인하도록 비워 둔다.
+> 준법문서 원칙상 **유일하게 매칭되고 유효기간 내인 경우에만 '적(Y)'** 확정한다. 동명이인·만료·
+> 미발견은 비워 두고 경고를 남겨 담당자가 확인한다. (혁신형중소기업 파일은 주기적 스냅샷이라
+> 최종 확정은 이노비즈넷/벤처공시 1회 대조 권장.)
 
 ### 4단계 — 결과 보고
 

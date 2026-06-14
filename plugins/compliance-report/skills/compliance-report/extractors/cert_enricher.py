@@ -20,16 +20,22 @@ import os
 import re
 import csv
 import json
+import time
 import datetime
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 
 VENTURE_NS = "15084581/v1"
 ODCLOUD_BASE = "https://api.odcloud.kr/api"
 SWAGGER_URL = "https://infuser.odcloud.kr/oas/docs?namespace=" + VENTURE_NS
 
+# 혁신형중소기업현황(3033893): API 없음 → 데이터셋 페이지에서 zip 자동 다운로드
+INNOBIZ_PAGE = "https://www.data.go.kr/tcs/dss/selectFileDataDetailView.do?publicDataPk=3033893"
+INNOBIZ_DL = "https://www.data.go.kr/cmm/cmm/fileDownload.do"
+
 DEFAULT_VENTURE_CACHE = os.path.join(".", "_data", "venture_list.json")
-DEFAULT_INNOBIZ_CSV = os.path.join(".", "_data", "innobiz.csv")
+DEFAULT_INNOBIZ_CACHE = os.path.join(".", "_data", "innobiz.json")
+_UA = {"User-Agent": "Mozilla/5.0"}
 
 
 def _slim(s):
@@ -155,41 +161,119 @@ def lookup_venture(name, address="", cache_path=None):
 
 # ───────────────────── 이노비즈/메인비즈 CSV ─────────────────────
 
-def lookup_innobiz(name, address="", csv_path=None):
-    """혁신형중소기업현황 CSV(회사명·대표·업종·지역·유효기간)에서 회사명 매칭."""
-    csv_path = csv_path or os.environ.get('INNOBIZ_CSV_PATH', DEFAULT_INNOBIZ_CSV)
-    if not name or not os.path.exists(csv_path):
+def refresh_innobiz_cache(cache_path=None, *, timeout=60):
+    """혁신형중소기업현황(3033893) zip(이노비즈+메인비즈 CSV)을 자동 다운로드해
+    회사명 인덱스 JSON 으로 저장. 인증키 불필요(공개 파일). 저장 건수 반환."""
+    import io
+    cache_path = cache_path or os.environ.get('INNOBIZ_CACHE_PATH', DEFAULT_INNOBIZ_CACHE)
+    page = urlopen(Request(INNOBIZ_PAGE, headers=_UA), timeout=timeout).read().decode('utf-8', 'replace')
+    m = re.search(r'fileDownload\.do\?atchFileId=(\w+)&fileDetailSn=(\d+)', page)
+    if not m:
+        raise RuntimeError("혁신형중소기업 다운로드 링크 탐색 실패")
+    dl = f"{INNOBIZ_DL}?atchFileId={m.group(1)}&fileDetailSn={m.group(2)}&insertDataPrcus=N"
+    raw = urlopen(Request(dl, headers=_UA), timeout=timeout).read()
+
+    import zipfile as _zip
+    z = _zip.ZipFile(io.BytesIO(raw))
+    index = {}
+    count = 0
+    for nm in z.namelist():
+        if not nm.lower().endswith('.csv'):
+            continue
+        cert = '메인비즈' if '경영혁신' in nm else '이노비즈'
+        body = z.read(nm)
+        text = None
+        for enc in ('cp949', 'utf-8-sig', 'euc-kr', 'utf-8'):
+            try:
+                text = body.decode(enc)
+                break
+            except Exception:
+                continue
+        if text is None:
+            continue
+        for row in csv.DictReader(text.splitlines()):
+            r = {(k or '').strip(): (v or '').strip() for k, v in row.items()}
+            cn = next((r[k] for k in r if k in ('회사명', '기업명', '사업자명', '업체명')), '')
+            if not cn:
+                continue
+            rep = next((r[k] for k in r if '대표' in k), '')
+            region = next((r[k] for k in r if '지역' in k), '')
+            expiry = next((r[k] for k in r if '만료' in k or '유효' in k or '기간' in k), '')
+            index.setdefault(_slim(cn), []).append(
+                {"name": cn, "rep": rep, "region": region, "expiry": expiry, "cert": cert})
+            count += 1
+    os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump({"_count": count, "index": index}, f, ensure_ascii=False)
+    return count
+
+
+def lookup_innobiz(name, address="", representative="", cache_path=None):
+    """이노비즈/메인비즈 캐시에서 회사명 매칭(대표·지역으로 동명이인 보정)."""
+    cache_path = cache_path or os.environ.get('INNOBIZ_CACHE_PATH', DEFAULT_INNOBIZ_CACHE)
+    if not name or not os.path.exists(cache_path):
         return {}
-    target = _slim(name)
-    hits = []
-    with open(csv_path, encoding="utf-8-sig", newline="") as f:
-        for row in csv.DictReader(f):
-            vals = {(k or "").strip(): (v or "").strip() for k, v in row.items()}
-            nm = next((vals[k] for k in vals if k in ("사업자명", "기업명", "회사명", "업체명")), "")
-            if nm and _slim(nm) == target:
-                hits.append(vals)
+    with open(cache_path, encoding="utf-8") as f:
+        index = json.load(f).get("index", {})
+    hits = index.get(_slim(name), [])
     if not hits:
         return {}
+    if len(hits) > 1 and representative:
+        narrowed = [h for h in hits if h.get("rep") and _slim(h["rep"]) == _slim(representative)]
+        if narrowed:
+            hits = narrowed
     if len(hits) > 1 and address:
-        at = _addr_tokens(address)
-        narrowed = [h for h in hits
-                    if at and any(t in " ".join(h.values()) for t in at)]
+        narrowed = [h for h in hits if h.get("region") and h["region"][:2] in address]
         if narrowed:
             hits = narrowed
     if len(hits) != 1:
-        return {"_warnings": [f"이노비즈 매칭 모호({len(hits)}건): {name} — 담당자 확인"]}
+        return {"_warnings": [f"이노비즈/메인비즈 매칭 모호({len(hits)}건): {name} — 담당자 확인"]}
     h = hits[0]
-    expiry = next((h[k] for k in h if "유효" in k or "기간" in k), "")
-    return {"is_innobiz": "Y", "innobiz_expiry": expiry}
+    end = _parse_date(h.get("expiry"))
+    if end and end < _today():
+        return {"_warnings": [f"{h['cert']} 확인기간 만료({h.get('expiry')}): {name} — 담당자 확인"]}
+    return {"is_innobiz": "Y", "innobiz_expiry": h.get("expiry", ""), "_cert_type": h.get("cert")}
 
 
 # ───────────────────── 통합 ─────────────────────
 
-def enrich_report(report_data, *, venture_cache=None, innobiz_csv=None):
+def _stale(path, max_age_days):
+    """캐시가 없거나 max_age_days 보다 오래되면 True."""
+    if not os.path.exists(path):
+        return True
+    return (time.time() - os.path.getmtime(path)) / 86400.0 > max_age_days
+
+
+def auto_refresh(venture_cache=None, innobiz_cache=None, *, max_age_days=None):
+    """캐시가 오래됐으면 자동 재다운로드. 네트워크 실패는 무시(기존 캐시 유지).
+
+    이노비즈/메인비즈는 인증키 없이 받으며, 벤처는 키가 있을 때만 갱신한다."""
+    if max_age_days is None:
+        max_age_days = int(os.environ.get('CERT_CACHE_MAX_AGE_DAYS', '30'))
+    vc = venture_cache or os.environ.get('VENTURE_CACHE_PATH', DEFAULT_VENTURE_CACHE)
+    ic = innobiz_cache or os.environ.get('INNOBIZ_CACHE_PATH', DEFAULT_INNOBIZ_CACHE)
+    msgs = []
+    if _stale(ic, max_age_days):
+        try:
+            msgs.append(f"이노비즈/메인비즈 캐시 갱신: {refresh_innobiz_cache(ic)}건")
+        except Exception as e:  # noqa: BLE001
+            msgs.append(f"이노비즈 캐시 갱신 실패(기존 사용): {e}")
+    if _key() and _stale(vc, max_age_days):
+        try:
+            msgs.append(f"벤처 명단 캐시 갱신: {refresh_venture_cache(vc)}건")
+        except Exception as e:  # noqa: BLE001
+            msgs.append(f"벤처 캐시 갱신 실패(기존 사용): {e}")
+    return msgs
+
+
+def enrich_report(report_data, *, venture_cache=None, innobiz_csv=None, refresh=True):
     """회사명(+주소)로 벤처·이노비즈 조회 → 표4 필드(is_venture/is_innobiz) 확정.
 
+    refresh=True 면 캐시가 오래됐을 때 자동 재다운로드한다(주기적 최신화).
     유일·유효 매칭만 'Y' 로 채우고, 모호/만료/미발견은 그대로 둔다(경고 반환)."""
     warnings = []
+    if refresh:
+        warnings += auto_refresh(venture_cache, innobiz_csv)
     addr = getattr(report_data, 'address', '') or ''
 
     v = lookup_venture(report_data.company_name, addr, venture_cache)
@@ -199,7 +283,8 @@ def enrich_report(report_data, *, venture_cache=None, innobiz_csv=None):
             report_data.venture_expiry = v["venture_expiry"]
     warnings += v.get("_warnings", [])
 
-    i = lookup_innobiz(report_data.company_name, addr, innobiz_csv)
+    i = lookup_innobiz(report_data.company_name, addr,
+                       getattr(report_data, 'representative', '') or '', innobiz_csv)
     if i.get("is_innobiz") == "Y":
         report_data.is_innobiz = "Y"
         if i.get("innobiz_expiry"):
@@ -209,8 +294,15 @@ def enrich_report(report_data, *, venture_cache=None, innobiz_csv=None):
     return warnings
 
 
-if __name__ == "__main__":  # 캐시 갱신 CLI: python -m extractors.cert_enricher refresh
+if __name__ == "__main__":
+    # 캐시 갱신 CLI:
+    #   python -m extractors.cert_enricher refresh           # 벤처+이노비즈 모두
+    #   python -m extractors.cert_enricher refresh venture   # 벤처만
+    #   python -m extractors.cert_enricher refresh innobiz   # 이노비즈/메인비즈만
     import sys
+    what = sys.argv[2] if len(sys.argv) > 2 else "all"
     if len(sys.argv) > 1 and sys.argv[1] == "refresh":
-        n = refresh_venture_cache()
-        print(f"벤처기업명단 캐시 저장: {n}건")
+        if what in ("all", "venture"):
+            print(f"벤처기업명단 캐시 저장: {refresh_venture_cache()}건")
+        if what in ("all", "innobiz"):
+            print(f"이노비즈/메인비즈 캐시 저장: {refresh_innobiz_cache()}건")
