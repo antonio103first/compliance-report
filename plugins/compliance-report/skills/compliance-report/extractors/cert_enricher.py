@@ -224,6 +224,60 @@ def refresh_innobiz_cache(cache_path=None, *, timeout=60):
     return count
 
 
+INNOBIZ_WEB = "https://www.innobiz.net/ajax.fill_com.asp?Co_Name="
+
+
+def lookup_innobiz_web(name, representative="", address="", *, timeout=15):
+    """이노비즈넷 실시간 조회(ajax.fill_com.asp). 현재 유효한 이노비즈 인증만 노출되므로
+    명단 캐시(스냅샷)보다 최신이다. 회사명 정확일치 + 대표·지역 보정, 유효기간 확인."""
+    if not name:
+        return {}
+    # 엔드포인트는 '주식회사/㈜' 포함 시 매칭 실패 → 법인격 제거한 핵심명으로 조회
+    qname = re.sub(r'주식회사|\(주\)|㈜', ' ', name).strip() or name
+    html = ""
+    last_err = None
+    for _attempt in range(2):  # 엔드포인트가 간헐적으로 빈 응답 → 1회 재시도
+        try:
+            req = Request(INNOBIZ_WEB + quote(qname), headers={**_UA, "Referer": INNOBIZ_PUBLIC})
+            html = urlopen(req, timeout=timeout).read().decode("utf-8-sig", "replace")
+            if "<tbody" in html and "<tr>" in html[html.find("<tbody"):]:
+                break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            time.sleep(0.5)
+    if not html and last_err:
+        return {"_warnings": [f"이노비즈넷 실시간 조회 실패: {last_err}"]}
+    tb = html[html.find("<tbody"):html.find("</tbody>")] if "<tbody" in html else ""
+    cands = []
+    for row in re.findall(r"<tr>(.*?)</tr>", tb, re.DOTALL):
+        tds = re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL)
+        if len(tds) < 5:
+            continue
+        cl = lambda s: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s)).strip()
+        cands.append({"name": cl(tds[0]), "rep": cl(tds[1]),
+                      "region": cl(tds[2]), "period": cl(tds[4])})
+    hits = [c for c in cands if _slim(c["name"]) == _slim(name)]
+    if not hits:
+        return {}
+    if len(hits) > 1 and representative:
+        n = [h for h in hits if _slim(h["rep"]) == _slim(representative)]
+        if n:
+            hits = n
+    if len(hits) > 1 and address:
+        n = [h for h in hits if h["region"] and h["region"][:2] in address]
+        if n:
+            hits = n
+    if len(hits) != 1:
+        return {"_warnings": [f"이노비즈넷 매칭 모호({len(hits)}건): {name} — {innobiz_verify_link(name)}"]}
+    h = hits[0]
+    m = re.search(r"~\s*(\d{4}-\d{2}-\d{2})", h["period"])
+    end = _parse_date(m.group(1)) if m else None
+    if end and end < _today():
+        return {"_warnings": [f"이노비즈 유효기간 만료({h['period']}): {name} — {innobiz_verify_link(name)}"]}
+    return {"is_innobiz": "Y", "innobiz_expiry": (m.group(1) if m else ""),
+            "_cert_type": "이노비즈", "_realtime": True}
+
+
 def lookup_innobiz(name, address="", representative="", cache_path=None):
     """이노비즈/메인비즈 캐시에서 회사명 매칭(대표·지역으로 동명이인 보정)."""
     cache_path = cache_path or os.environ.get('INNOBIZ_CACHE_PATH', DEFAULT_INNOBIZ_CACHE)
@@ -314,8 +368,16 @@ def enrich_report(report_data, *, venture_cache=None, innobiz_csv=None, refresh=
             report_data.venture_expiry = v["venture_expiry"]
     warnings += v.get("_warnings", [])
 
-    i = lookup_innobiz(report_data.company_name, addr,
-                       getattr(report_data, 'representative', '') or '', innobiz_csv)
+    rep = getattr(report_data, 'representative', '') or ''
+    i = lookup_innobiz(report_data.company_name, addr, rep, innobiz_csv)
+    # 로컬 캐시(스냅샷)가 확정 못하면(미발견/만료/모호) 이노비즈넷 실시간 조회로 보완
+    if i.get("is_innobiz") != "Y" and os.environ.get('CERT_WEB_FALLBACK', '1') != '0':
+        wj = lookup_innobiz_web(report_data.company_name, rep, addr)
+        if wj.get("is_innobiz") == "Y":
+            i = wj
+            warnings.append(f"이노비즈: 이노비즈넷 실시간 확인 (유효 ~{wj.get('innobiz_expiry')})")
+        elif wj.get("_warnings"):
+            warnings += wj["_warnings"]
     if i.get("is_innobiz") == "Y":
         report_data.is_innobiz = "Y"
         if i.get("innobiz_expiry"):
